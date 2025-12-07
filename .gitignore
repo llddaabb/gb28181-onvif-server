@@ -1,0 +1,74 @@
+# 二进制文件
+server
+main
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 日志文件
+logs/
+*.log
+
+# 临时文件
+*.pid
+*.swp
+*.swo
+*~
+
+# 依赖和构建
+vendor/
+node_modules/
+dist/
+build/
+
+# ZLM相关
+third-party/zlm/bin/
+third-party/zlm/log/
+third-party/zlm/recordings/
+third-party/zlm/www/record/
+$THIRD_PARTY_DIR/
+
+# 录像文件
+*.mp4
+*.flv
+*.ts
+recordings/
+
+# 配置文件（可能包含敏感信息）
+configs/config.yaml
+
+# 前端构建产物
+frontend/dist/
+frontend/node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+ai_detector_service.py
+venv/
+env/
+.venv
+
+# AI模型文件
+models/*.onnx
+models/*.pt
+models/*.pth
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# 测试文件
+/tmp/
+*.test
+coverage/
+
+# 其他
+.env
+.env.local

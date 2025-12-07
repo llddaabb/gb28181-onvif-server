@@ -1,0 +1,29 @@
+{
+  "diskGroups": {},
+  "disks": {
+    "disk_default": {
+      "id": "disk_default",
+      "name": "默认磁盘",
+      "mountPoint": "/home/julei/zpip/recordings",
+      "totalSize": 249366470656,
+      "usedSize": 52022935552,
+      "freeSize": 197343535104,
+      "status": "online",
+      "priority": 0,
+      "enabled": true,
+      "lastCheck": "2025-12-07T15:28:45.934324307+08:00",
+      "devicePath": "",
+      "fileSystem": "auto",
+      "description": ""
+    }
+  },
+  "recyclePolicy": {
+    "enabled": true,
+    "mode": "oldest",
+    "keepDays": 0,
+    "keepSizeGB": 0,
+    "keepCount": 0,
+    "minFreeSpacePercent": 10,
+    "checkInterval": 300000000000
+  }
+}
