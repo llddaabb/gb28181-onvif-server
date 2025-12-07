@@ -35,8 +35,8 @@ $THIRD_PARTY_DIR/
 *.ts
 recordings/
 
-# 配置文件（可能包含敏感信息）
-configs/config.yaml
+# 配置文件（保留示例文件）
+# configs/config.yaml  # 本地配置保留，使用 config.example.yaml 作为模板
 
 # 前端构建产物
 frontend/dist/
@@ -48,7 +48,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
-ai_detector_service.py
+# ai_detector_service.py  # 这个文件是自动生成的，但需要保留模板
 venv/
 env/
 .venv
