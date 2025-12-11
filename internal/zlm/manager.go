@@ -7,14 +7,14 @@ import (
 
 // EnhancedZLMManager 增强的 ZLM 管理器 - 结合 API 客户端和本地管理
 type EnhancedZLMManager struct {
-	apiClient *ZLMAPIClient
+	apiClient   *ZLMAPIClient
 	localServer *ZLMServer
 }
 
 // NewEnhancedZLMManager 创建增强的 ZLM 管理器
 func NewEnhancedZLMManager(apiURL string, cfg *Config) *EnhancedZLMManager {
 	return &EnhancedZLMManager{
-		apiClient: NewZLMAPIClient(apiURL, WithTimeout(10)),
+		apiClient:   NewZLMAPIClient(apiURL, WithTimeout(10)),
 		localServer: NewZLMServer(cfg),
 	}
 }

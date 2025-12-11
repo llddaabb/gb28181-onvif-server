@@ -37,6 +37,7 @@ type Device struct {
 	HardwareID      string              // 硬件ID
 	IP              string              // IP地址
 	Port            int                 // ONVIF端口
+	SipPort         int                 // GB28181 SIP端口
 	Username        string              // 用户名
 	Password        string              // 密码
 	Status          string              // 在线状态: online/offline/unknown
@@ -258,7 +259,8 @@ func (m *Manager) tryAutoAddDevice(result DeviceDiscoveryResult) {
 		Model:         result.Model,
 		Manufacturer:  result.Manufacturer,
 		IP:            host,
-		Port:          port,
+		Port:          port, // ONVIF Port
+		SipPort:       5060, // 默认SIP端口
 		Status:        "discovered",
 		DiscoveryTime: time.Now(),
 		Services:      result.Types,
@@ -270,15 +272,36 @@ func (m *Manager) tryAutoAddDevice(result DeviceDiscoveryResult) {
 		device.Name = fmt.Sprintf("ONVIF Camera (%s)", host)
 	}
 
-	log.Printf("[ONVIF] 🔍 自动发现设备: %s (%s)", device.Name, device.DeviceID)
+	// 尝试获取设备详细信息（无认证）
+	go func() {
+		xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", host, port)
+		detailedDevice, err := m.getDeviceDetails(xaddr, "", "")
+		if err == nil && detailedDevice != nil {
+			// 使用详细信息更新设备
+			m.devicesMux.Lock()
+			detailedDevice.DiscoveryTime = device.DiscoveryTime
+			if detailedDevice.Name == "" {
+				detailedDevice.Name = device.Name
+			}
+			m.devices[deviceID] = detailedDevice
+			m.devicesMux.Unlock()
+			log.Printf("[ONVIF] 🔍 自动发现设备: %s (%s)", detailedDevice.Name, detailedDevice.DeviceID)
+		} else {
+			// 使用基本信息添加设备
+			m.devicesMux.Lock()
+			m.devices[deviceID] = device
+			m.devicesMux.Unlock()
+			log.Printf("[ONVIF] 🔍 自动发现设备: %s (%s)", device.Name, device.DeviceID)
+		}
 
-	// 触发设备发现事件
-	m.emitEvent(DeviceEvent{
-		Type:      "discovered",
-		DeviceID:  deviceID,
-		Device:    device,
-		Timestamp: time.Now(),
-	})
+		// 触发设备发现事件
+		m.emitEvent(DeviceEvent{
+			Type:      "discovered",
+			DeviceID:  deviceID,
+			Device:    device,
+			Timestamp: time.Now(),
+		})
+	}()
 }
 
 // getDeviceDetails 获取设备详细信息
@@ -353,6 +376,7 @@ func (m *Manager) getDeviceDetails(xaddr, username, password string) (*Device, e
 		HardwareID:      deviceInfo["HardwareId"],
 		IP:              ip,
 		Port:            port,
+		SipPort:         5060, // 默认SIP端口
 		Username:        username,
 		Password:        password,
 		Status:          "online",
@@ -434,14 +458,9 @@ func (m *Manager) StartStream(deviceID, profileToken string) (string, error) {
 
 // GetStreamURL 获取设备流地址（不启动流）
 func (m *Manager) GetStreamURL(deviceID, profileToken string) (string, error) {
-	device, exists := m.GetDeviceByID(deviceID)
+	_, exists := m.GetDeviceByID(deviceID)
 	if !exists {
 		return "", fmt.Errorf("设备不存在: %s", deviceID)
-	}
-
-	// 如果已有预览URL，直接返回
-	if device.PreviewURL != "" && profileToken == "" {
-		return device.PreviewURL, nil
 	}
 
 	return m.StartStream(deviceID, profileToken)
@@ -581,6 +600,37 @@ func (m *Manager) AddDeviceWithIP(ip string, port int, username, password string
 	log.Printf("[ONVIF] 📝 通过IP添加设备: %s:%d", ip, port)
 
 	return m.AddDevice(xaddr, username, password)
+}
+
+// VerifyDeviceCredentials 验证设备的用户名和密码是否正确
+func (m *Manager) VerifyDeviceCredentials(ip string, port int, username, password string) error {
+	xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", ip, port)
+	log.Printf("[ONVIF] 🔐 正在验证设备凭据: %s", xaddr)
+
+	// 创建一个临时的ONVIF设备客户端进行测试
+	d, err := NewDevice(DeviceParams{
+		Xaddr:    xaddr,
+		Username: username,
+		Password: password,
+		Timeout:  10 * time.Second, // 使用一个合理的超时时间
+	})
+	if err != nil {
+		return fmt.Errorf("创建设备客户端失败: %w", err)
+	}
+
+	// 调用一个需要认证的简单方法来测试凭据。
+	// GetSystemDateAndTime 是一个很好的选择，因为它很轻量。
+	_, err = d.GetSystemDateAndTime()
+	if err != nil {
+		// 检查返回的错误是否明确指示认证失败
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "not authorized") || strings.Contains(errMsg, "unauthorized") {
+			return fmt.Errorf("凭据无效：用户名或密码错误")
+		}
+
+		return fmt.Errorf("无法验证设备凭据: %w", err)
+	}
+	return nil // err 为 nil，表示验证成功
 }
 
 // RemoveDevice 移除ONVIF设备
@@ -1108,6 +1158,7 @@ type WSDiscoveryService struct {
 	stopChan   chan struct{}
 	running    bool
 	interfaces []net.Interface // 网络接口列表
+	localIPs   []net.IP        // 所有本地IPv4地址
 }
 
 // NewWSDiscoveryService 创建WS-Discovery服务
@@ -1126,7 +1177,7 @@ func (s *WSDiscoveryService) Start() error {
 		return fmt.Errorf("获取网络接口失败: %w", err)
 	}
 
-	// 过滤有效的网络接口
+	// 收集所有有效的IPv4地址
 	for _, iface := range interfaces {
 		// 跳过不活动和回环接口
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
@@ -1143,7 +1194,8 @@ func (s *WSDiscoveryService) Start() error {
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
 				hasIPv4 = true
-				break
+				// 收集每个IPv4地址
+				s.localIPs = append(s.localIPs, ipnet.IP)
 			}
 		}
 
@@ -1152,12 +1204,15 @@ func (s *WSDiscoveryService) Start() error {
 		}
 	}
 
-	if len(s.interfaces) == 0 {
-		log.Println("[ONVIF] [WARN] 未找到可用的网络接口")
+	if len(s.localIPs) == 0 {
+		log.Println("[ONVIF] [WARN] 未找到可用的IPv4地址")
 	}
 
 	s.running = true
-	log.Printf("[ONVIF] ✓ WS-Discovery服务启动 (发现 %d 个网络接口)", len(s.interfaces))
+	log.Printf("[ONVIF] ✓ WS-Discovery服务启动 (发现 %d 个网络接口, %d 个IP地址)", len(s.interfaces), len(s.localIPs))
+	for _, ip := range s.localIPs {
+		log.Printf("[ONVIF]   - %s", ip.String())
+	}
 
 	return nil
 }
@@ -1171,7 +1226,7 @@ func (s *WSDiscoveryService) Stop() {
 	}
 }
 
-// Probe 发送WS-Discovery探测消息（支持多网卡）
+// Probe 发送WS-Discovery探测消息（支持多网卡多IP）
 func (s *WSDiscoveryService) Probe() ([]DeviceDiscoveryResult, error) {
 	var allResults []DeviceDiscoveryResult
 	resultMap := make(map[string]bool) // 用于去重
@@ -1182,11 +1237,11 @@ func (s *WSDiscoveryService) Probe() ([]DeviceDiscoveryResult, error) {
 		return nil, fmt.Errorf("解析多播地址失败: %w", err)
 	}
 
-	// 在每个网络接口上发送探测
-	for _, iface := range s.interfaces {
-		results, err := s.probeOnInterface(iface, multicastAddr)
+	// 在每个IP地址上发送探测
+	for _, localIP := range s.localIPs {
+		results, err := s.probeOnIP(localIP, multicastAddr)
 		if err != nil {
-			debug.Debug("onvif", "接口 %s 探测失败: %v", iface.Name, err)
+			debug.Debug("onvif", "IP %s 探测失败: %v", localIP.String(), err)
 			continue
 		}
 
@@ -1199,8 +1254,8 @@ func (s *WSDiscoveryService) Probe() ([]DeviceDiscoveryResult, error) {
 		}
 	}
 
-	// 如果没有指定接口，使用默认接口
-	if len(s.interfaces) == 0 {
+	// 如果没有本地IP，使用默认接口
+	if len(s.localIPs) == 0 {
 		results, err := s.probeDefault(multicastAddr)
 		if err != nil {
 			debug.Debug("onvif", "默认接口探测失败: %v", err)
@@ -1218,34 +1273,16 @@ func (s *WSDiscoveryService) Probe() ([]DeviceDiscoveryResult, error) {
 	return allResults, nil
 }
 
-// probeOnInterface 在指定网络接口上发送探测
-func (s *WSDiscoveryService) probeOnInterface(iface net.Interface, multicastAddr *net.UDPAddr) ([]DeviceDiscoveryResult, error) {
-	// 获取接口的IPv4地址
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return nil, err
-	}
-
-	var localIP net.IP
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-			localIP = ipnet.IP
-			break
-		}
-	}
-
-	if localIP == nil {
-		return nil, fmt.Errorf("接口 %s 没有IPv4地址", iface.Name)
-	}
-
-	// 创建UDP连接，绑定到特定接口
+// probeOnIP 在指定IP地址上发送探测
+func (s *WSDiscoveryService) probeOnIP(localIP net.IP, multicastAddr *net.UDPAddr) ([]DeviceDiscoveryResult, error) {
+	// 创建UDP连接，绑定到特定IP
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: localIP, Port: 0})
 	if err != nil {
 		return nil, fmt.Errorf("创建UDP连接失败: %w", err)
 	}
 	defer conn.Close()
 
-	return s.sendProbeAndCollect(conn, multicastAddr, iface.Name)
+	return s.sendProbeAndCollect(conn, multicastAddr, localIP.String())
 }
 
 // probeDefault 使用默认接口发送探测

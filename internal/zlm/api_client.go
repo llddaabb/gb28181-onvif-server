@@ -45,6 +45,21 @@ type StreamInfo struct {
 	CreateTime  int64  `json:"createTime"`  // 创建时间
 	AliveSecond int    `json:"aliveSecond"` // 存活时间 (秒)
 	OriginURL   string `json:"originUrl"`   // 源流地址
+	OriginSock  *struct {
+		Identifier string `json:"identifier"`
+		LocalIP    string `json:"local_ip"`
+		LocalPort  int    `json:"local_port"`
+		PeerIP     string `json:"peer_ip"`
+		PeerPort   int    `json:"peer_port"`
+	} `json:"originSock,omitempty"`
+	Tracks []TrackInfo `json:"tracks,omitempty"`
+}
+
+// TrackInfo 流中单个 track 的信息（用于判断编码）
+type TrackInfo struct {
+	CodecID   int    `json:"codec_id"`
+	CodecName string `json:"codec_id_name"`
+	CodecType int    `json:"codec_type"`
 }
 
 // RTPInfo RTP 推流信息
@@ -158,7 +173,7 @@ func (c *ZLMAPIClient) GetMediaList() ([]*StreamInfo, error) {
 		app, _ := item["app"].(string)
 		stream, _ := item["stream"].(string)
 		schema, _ := item["schema"].(string)
-		
+
 		// 使用 app_stream 作为唯一键，只保留第一个（通常是 rtsp）
 		key := app + "_" + stream
 		if seen[key] {
@@ -188,6 +203,52 @@ func (c *ZLMAPIClient) GetMediaList() ([]*StreamInfo, error) {
 			streamInfo.CreateTime = int64(createStamp)
 		}
 		streamInfo.Schema = schema
+
+		// 解析 tracks 字段以获取 codec 信息
+		if tarr, ok := item["tracks"].([]interface{}); ok {
+			for _, ti := range tarr {
+				if m, ok2 := ti.(map[string]interface{}); ok2 {
+					var tr TrackInfo
+					if cid, ok3 := m["codec_id"].(float64); ok3 {
+						tr.CodecID = int(cid)
+					}
+					if cname, ok3 := m["codec_id_name"].(string); ok3 {
+						tr.CodecName = cname
+					}
+					if ctype, ok3 := m["codec_type"].(float64); ok3 {
+						tr.CodecType = int(ctype)
+					}
+					streamInfo.Tracks = append(streamInfo.Tracks, tr)
+				}
+			}
+		}
+
+		// 解析 originSock（如果有）以便上层能获取本地端口信息
+		if osock, ok := item["originSock"].(map[string]interface{}); ok {
+			var sock struct {
+				Identifier string `json:"identifier"`
+				LocalIP    string `json:"local_ip"`
+				LocalPort  int    `json:"local_port"`
+				PeerIP     string `json:"peer_ip"`
+				PeerPort   int    `json:"peer_port"`
+			}
+			if id, ok2 := osock["identifier"].(string); ok2 {
+				sock.Identifier = id
+			}
+			if lip, ok2 := osock["local_ip"].(string); ok2 {
+				sock.LocalIP = lip
+			}
+			if lp, ok2 := osock["local_port"].(float64); ok2 {
+				sock.LocalPort = int(lp)
+			}
+			if pip, ok2 := osock["peer_ip"].(string); ok2 {
+				sock.PeerIP = pip
+			}
+			if pp, ok2 := osock["peer_port"].(float64); ok2 {
+				sock.PeerPort = int(pp)
+			}
+			streamInfo.OriginSock = &sock
+		}
 
 		streams = append(streams, streamInfo)
 	}
@@ -259,6 +320,12 @@ func (c *ZLMAPIClient) CloseStream(app, stream string) error {
 // API: POST /api/addStreamProxy
 // 将 RTSP/RTMP 流转为支持 Web 播放的 HTTP-FLV/WS-FLV/HLS 流
 func (c *ZLMAPIClient) AddStreamProxy(sourceURL, app, stream string) (*StreamProxyInfo, error) {
+	return c.AddStreamProxyWithOptions(sourceURL, app, stream, nil)
+}
+
+// AddStreamProxyWithOptions 支持自定义参数（如 rtp_type/timeout_sec/retry_count）
+func (c *ZLMAPIClient) AddStreamProxyWithOptions(sourceURL, app, stream string, opts map[string]interface{}) (*StreamProxyInfo, error) {
+	// 默认参数
 	params := map[string]interface{}{
 		"vhost":          "__defaultVhost__",
 		"app":            app,
@@ -273,6 +340,13 @@ func (c *ZLMAPIClient) AddStreamProxy(sourceURL, app, stream string) (*StreamPro
 		"rtp_type":       0, // 0: tcp, 1: udp, 2: multicast
 		"timeout_sec":    15,
 		"retry_count":    3,
+	}
+
+	// 合并 opts
+	if opts != nil {
+		for k, v := range opts {
+			params[k] = v
+		}
 	}
 
 	var resp struct {
@@ -730,4 +804,30 @@ func (c *ZLMAPIClient) GetRecordStatus(streams []struct{ App, Stream string }) (
 	}
 
 	return result, nil
+}
+
+// IsRtpServerOnline 检查 RTP 服务是否已存在，返回端口和 SSRC
+func (c *ZLMAPIClient) IsRtpServerOnline(streamID string) (bool, int, string, error) {
+	var resp struct {
+		Code  int    `json:"code"`
+		Msg   string `json:"msg"`
+		Exist bool   `json:"exist"`
+		Port  int    `json:"port"`
+		SSRC  string `json:"ssrc"`
+	}
+
+	params := map[string]interface{}{
+		"stream_id": streamID,
+	}
+
+	err := c.doRequest("GET", "/index/api/getRtpInfo", params, &resp)
+	if err != nil {
+		return false, 0, "", err
+	}
+
+	if resp.Code != 0 || !resp.Exist {
+		return false, 0, "", nil
+	}
+
+	return true, resp.Port, resp.SSRC, nil
 }

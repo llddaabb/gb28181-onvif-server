@@ -143,7 +143,10 @@ start() {
 stop() {
     # 先停止AI检测服务
     stop_ai_detector
-    
+
+    # 强制停止 ZLM 子进程（每次 stop/restart 都 kill）
+    pkill -9 -f "MediaServer" 2>/dev/null
+
     local pid=$(get_pid)
     if [ -z "$pid" ]; then
         echo -e "${YELLOW}[警告]${NC} 服务未运行"
@@ -152,10 +155,10 @@ stop() {
     fi
 
     echo -e "${YELLOW}[停止]${NC} 正在停止服务 (PID: $pid) ..."
-    
+
     # 发送 SIGTERM 信号
     kill "$pid" 2>/dev/null
-    
+
     # 等待进程退出
     local count=0
     while ps -p "$pid" > /dev/null 2>&1; do
@@ -164,12 +167,10 @@ stop() {
         if [ $count -ge 10 ]; then
             echo -e "${YELLOW}[警告]${NC} 进程未响应，强制终止..."
             kill -9 "$pid" 2>/dev/null
-            # 同时停止 ZLM 子进程
-            pkill -9 -f "MediaServer" 2>/dev/null
             break
         fi
     done
-    
+
     rm -f "$PID_FILE"
     echo -e "${GREEN}[成功]${NC} 服务已停止"
     return 0

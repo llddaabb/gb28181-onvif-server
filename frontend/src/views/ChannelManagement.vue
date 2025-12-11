@@ -173,7 +173,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="所属设备" required>
-          <el-select v-model="newChannel.deviceId" placeholder="请选择设备" style="width: 100%;">
+          <el-select v-model="newChannel.deviceId" placeholder="请选择设备" style="width: 100%;" @change="onDeviceSelected">
             <el-option 
               v-for="device in availableDevices" 
               :key="device.deviceId || device.id" 
@@ -183,7 +183,14 @@
           </el-select>
         </el-form-item>
         <el-form-item v-if="newChannel.deviceType === 'gb28181'" label="通道号">
-          <el-input v-model="newChannel.channel" placeholder="请输入通道号" />
+          <template v-if="availableDeviceChannels.length > 0">
+            <el-select v-model="newChannel.channel" placeholder="请选择通道号">
+              <el-option v-for="ch in availableDeviceChannels" :key="ch" :label="ch" :value="ch" />
+            </el-select>
+          </template>
+          <template v-else>
+            <el-input v-model="newChannel.channel" placeholder="请输入通道号" />
+          </template>
         </el-form-item>
         <el-form-item v-if="newChannel.deviceType === 'onvif'" label="Profile">
           <el-input v-model="newChannel.profileToken" placeholder="请输入Profile Token" />
@@ -198,71 +205,22 @@
       </template>
     </el-dialog>
 
-    <!-- 预览对话框 -->
+    <!-- 预览对话框 (使用 PreviewPlayer) -->
     <el-dialog 
       v-model="previewDialogVisible" 
       :title="`预览: ${selectedChannel?.channelName || selectedChannel?.channelId}`" 
       width="900px"
-      @close="stopPreview"
+      @close="() => { if (previewPlayerRef.value) previewPlayerRef.value.stopPreview() }"
     >
       <div class="preview-container">
-        <!-- 视频播放器 -->
         <div class="video-player-wrapper">
-          <video ref="videoPlayer" class="video-player" controls autoplay muted></video>
-          <div v-if="previewLoading" class="video-loading">
-            <el-icon class="is-loading"><Refresh /></el-icon>
-            <span>正在加载...</span>
-          </div>
-          <div v-if="previewError" class="video-error">
-            <el-icon><WarningFilled /></el-icon>
-            <span>{{ previewError }}</span>
-            <el-button type="primary" size="small" @click="retryPreview">重试</el-button>
-          </div>
+          <PreviewPlayer ref="previewPlayerRef" :show="previewDialogVisible" :device="{ deviceId: selectedChannel?.deviceId }" :channels="[{ channelId: selectedChannel?.channelId }]" :selectedChannelId="selectedChannel?.channelId || ''" />
         </div>
-        
-        <!-- 播放控制 -->
+
         <div class="preview-controls">
-          <el-button-group>
-            <el-button :type="playType === 'flv' ? 'primary' : 'default'" @click="playStream('flv')">
-              HTTP-FLV
-            </el-button>
-            <el-button :type="playType === 'hls' ? 'primary' : 'default'" @click="playStream('hls')">
-              HLS
-            </el-button>
-          </el-button-group>
-          <el-button type="danger" @click="stopPreview">停止播放</el-button>
+          <el-button type="danger" @click="() => { if (previewPlayerRef.value) previewPlayerRef.value.stopPreview(); previewDialogVisible = false }">停止播放</el-button>
         </div>
-        
-        <!-- 播放地址列表 -->
-        <div class="preview-urls">
-          <el-descriptions :column="2" border size="small">
-            <el-descriptions-item label="HTTP-FLV">
-              <div class="url-item">
-                <span class="url-text">{{ previewInfo.httpFlv }}</span>
-                <el-button type="primary" link size="small" @click="copyUrl(previewInfo.httpFlv)">复制</el-button>
-              </div>
-            </el-descriptions-item>
-            <el-descriptions-item label="HLS">
-              <div class="url-item">
-                <span class="url-text">{{ previewInfo.hls }}</span>
-                <el-button type="primary" link size="small" @click="copyUrl(previewInfo.hls)">复制</el-button>
-              </div>
-            </el-descriptions-item>
-            <el-descriptions-item label="RTSP">
-              <div class="url-item">
-                <span class="url-text">{{ previewInfo.rtsp }}</span>
-                <el-button type="primary" link size="small" @click="copyUrl(previewInfo.rtsp)">复制</el-button>
-              </div>
-            </el-descriptions-item>
-            <el-descriptions-item label="RTMP">
-              <div class="url-item">
-                <span class="url-text">{{ previewInfo.rtmp }}</span>
-                <el-button type="primary" link size="small" @click="copyUrl(previewInfo.rtmp)">复制</el-button>
-              </div>
-            </el-descriptions-item>
-          </el-descriptions>
-        </div>
-        
+
         <!-- 通道信息 -->
         <div class="channel-details">
           <el-descriptions :column="3" border size="small" title="通道信息">
@@ -294,9 +252,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, WarningFilled } from '@element-plus/icons-vue'
+import PreviewPlayer from '../components/PreviewPlayer.vue'
 
 interface Channel {
   channelId: string
@@ -348,6 +308,50 @@ const newChannel = ref({
   streamUrl: ''
 })
 
+// 可供选择的设备内部通道（当选择 GB28181 设备时填充）
+const availableDeviceChannels = ref<string[]>([])
+
+// 当用户在添加通道对话中选择设备时，自动填充通道或 ONVIF profile
+const onDeviceSelected = async (deviceId: string) => {
+  availableDeviceChannels.value = []
+  newChannel.value.channel = ''
+  newChannel.value.profileToken = ''
+  newChannel.value.streamUrl = ''
+
+  if (!deviceId) return
+
+  if (newChannel.value.deviceType === 'gb28181') {
+    // 尝试调用后端获取该 GB28181 设备的通道列表
+    try {
+      const resp = await fetch(`/api/gb28181/devices/${encodeURIComponent(deviceId)}/channels`)
+      if (resp.ok) {
+        const d = await resp.json()
+        if (d && Array.isArray(d.channels)) {
+          availableDeviceChannels.value = d.channels.map((c: any) => c.channelId || c.id || String(c))
+        }
+      }
+    } catch (e) {
+      console.warn('获取设备通道失败', e)
+    }
+  } else if (newChannel.value.deviceType === 'onvif') {
+    // 拉取 ONVIF profiles，自动选择第一个 profile token，并尝试构造 RTSP 地址
+    try {
+      const resp = await fetch(`/api/onvif/devices/${encodeURIComponent(deviceId)}/profiles`)
+      if (resp.ok) {
+        const d = await resp.json()
+        if (d && Array.isArray(d.profiles) && d.profiles.length > 0) {
+          newChannel.value.profileToken = d.profiles[0].token || d.profiles[0].profileToken || ''
+          // 如果返回了 streamUri 或 rtsp 地址，优先使用
+          const uri = d.profiles[0].streamUri || d.profiles[0].rtsp || d.profiles[0].source || ''
+          if (uri) newChannel.value.streamUrl = uri
+        }
+      }
+    } catch (e) {
+      console.warn('获取 ONVIF profiles 失败', e)
+    }
+  }
+}
+
 const gb28181Devices = ref<Device[]>([])
 const onvifDevices = ref<Device[]>([])
 
@@ -367,9 +371,8 @@ const previewInfo = reactive({
   rtmp: ''
 })
 
-// 视频播放器
-const videoPlayer = ref<HTMLVideoElement | null>(null)
-let flvPlayer: any = null
+// Preview player ref
+const previewPlayerRef = ref<any>(null)
 
 // 定时刷新
 let refreshTimer: number | null = null
@@ -383,8 +386,8 @@ const fetchChannels = async () => {
     channels.value = data.channels || []
   } catch (error) {
     console.error('获取通道列表失败:', error)
-    // 尝试从 GB28181 设备获取通道
-    await fetchChannelsFromDevices()
+    // 不自动从设备导入通道，通道应由用户手动添加
+    channels.value = []
   } finally {
     loading.value = false
   }
@@ -443,6 +446,7 @@ const showAddChannelDialog = () => {
     profileToken: '',
     streamUrl: ''
   }
+  availableDeviceChannels.value = []
   addChannelDialogVisible.value = true
 }
 
@@ -460,13 +464,15 @@ const addChannel = async () => {
       body: JSON.stringify(newChannel.value)
     })
     const data = await response.json()
-    
-    if (data.success) {
-      ElMessage.success('通道添加成功')
+
+    // 支持多种后端返回格式：{ success: true } 或 { status: 'ok' } 或 包含 channel 对象
+    const ok = data && (data.success === true || data.status === 'ok' || (data.channel && data.channel.channelId))
+    if (ok) {
+      ElMessage.success(data.message || '通道添加成功')
       addChannelDialogVisible.value = false
       fetchChannels()
     } else {
-      ElMessage.error(data.error || '通道添加失败')
+      ElMessage.error(data.error || data.message || '通道添加失败')
     }
   } catch (error) {
     ElMessage.error('通道添加失败')
@@ -613,127 +619,26 @@ const fetchRecordingStatus = async () => {
   recordingChannels.value = new Set(recordingChannels.value)
 }
 
-// 预览通道
+// 预览通道（委托 PreviewPlayer 处理启动/停止）
 const previewChannel = async (channel: Channel) => {
   selectedChannel.value = channel
   previewError.value = ''
-  previewLoading.value = true
-  
+  previewLoading.value = false
   previewDialogVisible.value = true
-  
+  // 等待对话框和子组件渲染完成，然后通过 ref 调用 startPreview 启动流
+  await nextTick()
   try {
-    // 先尝试使用测试预览 API（流代理方式，使用公共测试流）
-    let response = await fetch(`/api/gb28181/devices/${channel.deviceId}/channels/${channel.channelId}/preview/test`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    
-    let data = await response.json()
-    
-    // 如果测试预览失败，尝试使用真实预览 API
-    if (!data.success) {
-      response = await fetch(`/api/gb28181/devices/${channel.deviceId}/channels/${channel.channelId}/preview/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      })
-      data = await response.json()
+    if (previewPlayerRef.value && typeof previewPlayerRef.value.startPreview === 'function') {
+      await previewPlayerRef.value.startPreview(channel.channelId)
     }
-    
-    if (!data.success) {
-      previewError.value = data.error || '请求预览失败'
-      previewLoading.value = false
-      return
-    }
-    
-    // 使用返回的播放地址
-    const host = window.location.hostname
-    if (data.data) {
-      previewInfo.httpFlv = data.data.flv_url?.replace('127.0.0.1', host) || ''
-      previewInfo.hls = data.data.hls_url?.replace('127.0.0.1', host) || ''
-      previewInfo.rtsp = data.data.rtsp_url?.replace('127.0.0.1', host) || ''
-      previewInfo.rtmp = data.data.rtmp_url?.replace('127.0.0.1', host) || ''
-    }
-    
-    // 等待流建立
-    await new Promise(resolve => setTimeout(resolve, 1500))
-    
-    // 开始播放
-    playStream('flv')
-  } catch (error) {
-    console.error('预览请求失败:', error)
-    previewError.value = '请求预览失败，请检查设备连接'
-    previewLoading.value = false
-  }
-}
-
-// 播放流
-const playStream = async (type: 'flv' | 'hls') => {
-  stopPreviewPlayer()
-  playType.value = type
-  previewLoading.value = true
-  previewError.value = ''
-  
-  try {
-    if (type === 'flv' && videoPlayer.value) {
-      // 动态导入 flv.js
-      const flvjs = await import('flv.js')
-      if (flvjs.default.isSupported()) {
-        flvPlayer = flvjs.default.createPlayer({
-          type: 'flv',
-          url: previewInfo.httpFlv,
-          isLive: true
-        })
-        flvPlayer.attachMediaElement(videoPlayer.value)
-        flvPlayer.load()
-        flvPlayer.play()
-        
-        flvPlayer.on('error', (err: any) => {
-          console.error('FLV播放错误:', err)
-          previewError.value = '播放失败，请检查流是否在线'
-          previewLoading.value = false
-        })
-      } else {
-        previewError.value = '当前浏览器不支持 FLV 播放'
-      }
-    } else if (type === 'hls' && videoPlayer.value) {
-      videoPlayer.value.src = previewInfo.hls
-      videoPlayer.value.play()
-    }
-  } catch (error) {
-    console.error('播放失败:', error)
-    previewError.value = '播放失败，请检查流是否在线'
-  } finally {
-    previewLoading.value = false
-  }
-}
-
-// 停止播放器
-const stopPreviewPlayer = () => {
-  if (flvPlayer) {
-    try {
-      flvPlayer.pause()
-      flvPlayer.unload()
-      flvPlayer.detachMediaElement()
-      flvPlayer.destroy()
-    } catch (e) {}
-    flvPlayer = null
-  }
-  if (videoPlayer.value) {
-    videoPlayer.value.pause()
-    videoPlayer.value.src = ''
+  } catch (e) {
+    console.error('启动预览失败:', e)
   }
 }
 
 // 停止预览
 const stopPreview = () => {
-  stopPreviewPlayer()
-}
-
-// 重试预览
-const retryPreview = () => {
-  if (selectedChannel.value) {
-    playStream('flv')
-  }
+  if (previewPlayerRef.value) previewPlayerRef.value.stopPreview()
 }
 
 // 复制 URL
@@ -761,11 +666,21 @@ onMounted(async () => {
   refreshTimer = window.setInterval(fetchChannels, 30000)
 })
 
+// 当设备类型发生变化时清理设备相关的选择
+watch(() => newChannel.value.deviceType, (val) => {
+  availableDeviceChannels.value = []
+  newChannel.value.channel = ''
+  newChannel.value.profileToken = ''
+  newChannel.value.streamUrl = ''
+})
+
 onUnmounted(() => {
   if (refreshTimer) {
     clearInterval(refreshTimer)
   }
-  stopPreviewPlayer()
+  if (previewPlayerRef.value) {
+    try { previewPlayerRef.value.stopPreview() } catch (e) {}
+  }
 })
 </script>
 

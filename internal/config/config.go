@@ -46,9 +46,9 @@ type DebugConfig struct {
 // ZLMConfig ZLMediaKit 配置结构体
 type ZLMConfig struct {
 	// 进程管理配置
-	UseEmbedded  bool `yaml:"UseEmbedded"`
-	AutoRestart  bool `yaml:"AutoRestart"`
-	MaxRestarts  int  `yaml:"MaxRestarts"`
+	UseEmbedded bool `yaml:"UseEmbedded"`
+	AutoRestart bool `yaml:"AutoRestart"`
+	MaxRestarts int  `yaml:"MaxRestarts"`
 
 	// 子配置
 	API      *ZLMAPIConfig      `yaml:"API"`
@@ -128,26 +128,26 @@ type ZLMHLSConfig struct {
 
 // ZLMHookConfig ZLM Hook 配置
 type ZLMHookConfig struct {
-	Enable                bool    `yaml:"Enable"`
-	TimeoutSec            int     `yaml:"TimeoutSec"`
-	AliveInterval         float64 `yaml:"AliveInterval"`
-	Retry                 int     `yaml:"Retry"`
-	RetryDelay            float64 `yaml:"RetryDelay"`
-	OnFlowReport          string  `yaml:"OnFlowReport"`
-	OnHttpAccess          string  `yaml:"OnHttpAccess"`
-	OnPlay                string  `yaml:"OnPlay"`
-	OnPublish             string  `yaml:"OnPublish"`
-	OnRecordMP4           string  `yaml:"OnRecordMP4"`
-	OnRecordTS            string  `yaml:"OnRecordTS"`
-	OnStreamChanged       string  `yaml:"OnStreamChanged"`
-	OnStreamNoneReader    string  `yaml:"OnStreamNoneReader"`
-	OnStreamNotFound      string  `yaml:"OnStreamNotFound"`
-	OnServerStarted       string  `yaml:"OnServerStarted"`
-	OnServerExited        string  `yaml:"OnServerExited"`
-	OnServerKeepalive     string  `yaml:"OnServerKeepalive"`
-	OnSendRTPStopped      string  `yaml:"OnSendRTPStopped"`
-	OnRTPServerTimeout    string  `yaml:"OnRTPServerTimeout"`
-	StreamChangedSchemas  string  `yaml:"StreamChangedSchemas"`
+	Enable               bool    `yaml:"Enable"`
+	TimeoutSec           int     `yaml:"TimeoutSec"`
+	AliveInterval        float64 `yaml:"AliveInterval"`
+	Retry                int     `yaml:"Retry"`
+	RetryDelay           float64 `yaml:"RetryDelay"`
+	OnFlowReport         string  `yaml:"OnFlowReport"`
+	OnHttpAccess         string  `yaml:"OnHttpAccess"`
+	OnPlay               string  `yaml:"OnPlay"`
+	OnPublish            string  `yaml:"OnPublish"`
+	OnRecordMP4          string  `yaml:"OnRecordMP4"`
+	OnRecordTS           string  `yaml:"OnRecordTS"`
+	OnStreamChanged      string  `yaml:"OnStreamChanged"`
+	OnStreamNoneReader   string  `yaml:"OnStreamNoneReader"`
+	OnStreamNotFound     string  `yaml:"OnStreamNotFound"`
+	OnServerStarted      string  `yaml:"OnServerStarted"`
+	OnServerExited       string  `yaml:"OnServerExited"`
+	OnServerKeepalive    string  `yaml:"OnServerKeepalive"`
+	OnSendRTPStopped     string  `yaml:"OnSendRTPStopped"`
+	OnRTPServerTimeout   string  `yaml:"OnRTPServerTimeout"`
+	StreamChangedSchemas string  `yaml:"StreamChangedSchemas"`
 }
 
 // ZLMHTTPConfig ZLM HTTP 配置
@@ -166,12 +166,12 @@ type ZLMHTTPConfig struct {
 
 // ZLMRTMPConfig ZLM RTMP 配置
 type ZLMRTMPConfig struct {
-	Port             int  `yaml:"Port"`
-	SSLPort          int  `yaml:"SSLPort"`
-	HandshakeSecond  int  `yaml:"HandshakeSecond"`
-	KeepAliveSecond  int  `yaml:"KeepAliveSecond"`
-	DirectProxy      bool `yaml:"DirectProxy"`
-	Enhanced         bool `yaml:"Enhanced"`
+	Port            int  `yaml:"Port"`
+	SSLPort         int  `yaml:"SSLPort"`
+	HandshakeSecond int  `yaml:"HandshakeSecond"`
+	KeepAliveSecond int  `yaml:"KeepAliveSecond"`
+	DirectProxy     bool `yaml:"DirectProxy"`
+	Enhanced        bool `yaml:"Enhanced"`
 }
 
 // ZLMRTSPConfig ZLM RTSP 配置
@@ -197,33 +197,33 @@ type ZLMRTPConfig struct {
 
 // ZLMRTPProxyConfig ZLM RTP 代理配置
 type ZLMRTPProxyConfig struct {
-	Port                  int    `yaml:"Port"`
-	TimeoutSec            int    `yaml:"TimeoutSec"`
-	PortRange             string `yaml:"PortRange"`
-	H264PT                int    `yaml:"H264PT"`
-	H265PT                int    `yaml:"H265PT"`
-	PSPT                  int    `yaml:"PSPT"`
-	OpusPT                int    `yaml:"OpusPT"`
-	GOPCache              int    `yaml:"GOPCache"`
-	RTPG711DurMS          int    `yaml:"RTPG711DurMS"`
-	UDPRecvSocketBuffer   int    `yaml:"UDPRecvSocketBuffer"`
-	MergeFrame            bool   `yaml:"MergeFrame"`
+	Port                int    `yaml:"Port"`
+	TimeoutSec          int    `yaml:"TimeoutSec"`
+	PortRange           string `yaml:"PortRange"`
+	H264PT              int    `yaml:"H264PT"`
+	H265PT              int    `yaml:"H265PT"`
+	PSPT                int    `yaml:"PSPT"`
+	OpusPT              int    `yaml:"OpusPT"`
+	GOPCache            int    `yaml:"GOPCache"`
+	RTPG711DurMS        int    `yaml:"RTPG711DurMS"`
+	UDPRecvSocketBuffer int    `yaml:"UDPRecvSocketBuffer"`
+	MergeFrame          bool   `yaml:"MergeFrame"`
 }
 
 // ZLMRecordConfig ZLM 录制配置
 type ZLMRecordConfig struct {
-	AppName        string `yaml:"AppName"`
-	RecordPath     string `yaml:"RecordPath"`     // 录像存储路径（独立于ZLM工作目录）
-	FileBufSize    int    `yaml:"FileBufSize"`
-	SampleMS       int    `yaml:"SampleMS"`
-	FastStart      bool   `yaml:"FastStart"`
-	FileRepeat     bool   `yaml:"FileRepeat"`
-	EnableFmp4     bool   `yaml:"EnableFmp4"`
-	
+	AppName     string `yaml:"AppName"`
+	RecordPath  string `yaml:"RecordPath"` // 录像存储路径（独立于ZLM工作目录）
+	FileBufSize int    `yaml:"FileBufSize"`
+	SampleMS    int    `yaml:"SampleMS"`
+	FastStart   bool   `yaml:"FastStart"`
+	FileRepeat  bool   `yaml:"FileRepeat"`
+	EnableFmp4  bool   `yaml:"EnableFmp4"`
+
 	// 录像分割配置
-	FileSecond     int    `yaml:"FileSecond"`     // 录像切片时长(秒), 0表示不切片
-	FileSizeMB     int    `yaml:"FileSizeMB"`     // 录像文件大小限制(MB), 0表示不限制
-	
+	FileSecond int `yaml:"FileSecond"` // 录像切片时长(秒), 0表示不切片
+	FileSizeMB int `yaml:"FileSizeMB"` // 录像文件大小限制(MB), 0表示不限制
+
 	// 视频编码配置
 	EnableVideoCodec bool   `yaml:"EnableVideoCodec"` // 是否启用视频编码压缩
 	VideoCodec       string `yaml:"VideoCodec"`       // 视频编码格式: h264, h265
@@ -268,13 +268,13 @@ type ZLMShellConfig struct {
 // Config 总配置结构体
 // AIConfig AI功能配置
 type AIConfig struct {
-	Enable         bool    `yaml:"Enable"`          // 是否启用AI功能
-	APIEndpoint    string  `yaml:"APIEndpoint"`     // AI检测API地址
-	ModelPath      string  `yaml:"ModelPath"`       // 本地模型路径（未使用HTTP API时）
-	Confidence     float32 `yaml:"Confidence"`      // 置信度阈值
-	DetectInterval int     `yaml:"DetectInterval"`  // 检测间隔(秒)
-	RecordDelay    int     `yaml:"RecordDelay"`     // 录像延迟(秒)
-	MinRecordTime  int     `yaml:"MinRecordTime"`   // 最小录像时长(秒)
+	Enable         bool    `yaml:"Enable"`         // 是否启用AI功能
+	APIEndpoint    string  `yaml:"APIEndpoint"`    // AI检测API地址
+	ModelPath      string  `yaml:"ModelPath"`      // 本地模型路径（未使用HTTP API时）
+	Confidence     float32 `yaml:"Confidence"`     // 置信度阈值
+	DetectInterval int     `yaml:"DetectInterval"` // 检测间隔(秒)
+	RecordDelay    int     `yaml:"RecordDelay"`    // 录像延迟(秒)
+	MinRecordTime  int     `yaml:"MinRecordTime"`  // 最小录像时长(秒)
 }
 
 type Config struct {
@@ -465,17 +465,17 @@ func DefaultZLMConfig() *ZLMConfig {
 		},
 		Record: &ZLMRecordConfig{
 			AppName:          "record",
-			RecordPath:       "./recordings",  // 默认录像目录（项目根目录下）
+			RecordPath:       "./recordings", // 默认录像目录（项目根目录下）
 			FileBufSize:      65536,
 			SampleMS:         500,
 			FastStart:        false,
 			FileRepeat:       false,
 			EnableFmp4:       false,
-			FileSecond:       3600,    // 默认1小时切割一次
-			FileSizeMB:       0,        // 0表示仅按时间切割
-			EnableVideoCodec: false,    // 默认不启用转码（直接存储原始流）
-			VideoCodec:       "h264",   // 默认H264编码
-			VideoBitrate:     2000,     // 默认2Mbps
+			FileSecond:       3600,   // 默认1小时切割一次
+			FileSizeMB:       0,      // 0表示仅按时间切割
+			EnableVideoCodec: false,  // 默认不启用转码（直接存储原始流）
+			VideoCodec:       "h264", // 默认H264编码
+			VideoBitrate:     2000,   // 默认2Mbps
 		},
 		RTC: &ZLMRTCConfig{
 			Port:              8000,
@@ -693,18 +693,18 @@ func (z *ZLMConfig) GenerateConfigINI() string {
 	// [record]
 	sb.WriteString("[record]\n")
 	sb.WriteString(fmt.Sprintf("appName=%s\n", z.Record.AppName))
-	
+
 	// 设置录像文件路径（如果配置了独立录像目录）
 	if z.Record.RecordPath != "" {
 		sb.WriteString(fmt.Sprintf("filePath=%s\n", z.Record.RecordPath))
 	}
-	
+
 	sb.WriteString(fmt.Sprintf("fileBufSize=%d\n", z.Record.FileBufSize))
 	sb.WriteString(fmt.Sprintf("sampleMS=%d\n", z.Record.SampleMS))
 	sb.WriteString(fmt.Sprintf("fastStart=%d\n", boolToInt(z.Record.FastStart)))
 	sb.WriteString(fmt.Sprintf("fileRepeat=%d\n", boolToInt(z.Record.FileRepeat)))
 	sb.WriteString(fmt.Sprintf("enableFmp4=%d\n", boolToInt(z.Record.EnableFmp4)))
-	
+
 	// 录像分割配置
 	if z.Record.FileSecond > 0 {
 		sb.WriteString(fmt.Sprintf("fileSecond=%d\n", z.Record.FileSecond))

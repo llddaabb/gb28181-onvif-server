@@ -8,6 +8,13 @@
   </head>
   <body>
     <div id="app"></div>
+    <script>
+      if (!WebAssembly) {
+        document.getElementById('app').innerHTML =
+          '<h1 style="color:red;">您的浏览器不支持WebAssembly，无法使用本系统！</h1>';
+      }
+    </script>
+      <script type="text/javascript" src="/jessibuca/jessibuca.js"></script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

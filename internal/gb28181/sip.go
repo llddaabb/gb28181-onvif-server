@@ -72,16 +72,19 @@ type DeviceInfoResponse struct {
 
 // SIPMessage SIP消息结构体
 type SIPMessage struct {
-	Type    string            // 请求类型: REGISTER, INVITE, ACK, BYE, MESSAGE 等
-	Headers map[string]string // SIP头字段
-	Body    string            // 消息体
+	Type       string            // 请求类型: REGISTER, INVITE, ACK, BYE, MESSAGE 等 (请求) / "" (响应)
+	StatusCode int               // 状态码 (仅响应): 100-699
+	Reason     string            // 原因短语 (仅响应)
+	Headers    map[string]string // SIP头字段
+	Body       string            // 消息体
+	IsResponse bool              // 是否为响应
 }
 
 // ParseSIPMessage 解析SIP消息
 func ParseSIPMessage(data []byte) (*SIPMessage, error) {
 	reader := bufio.NewReader(strings.NewReader(string(data)))
 
-	// 解析请求行
+	// 解析请求行或状态行
 	requestLine, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("解析请求行失败: %w", err)
@@ -93,8 +96,24 @@ func ParseSIPMessage(data []byte) (*SIPMessage, error) {
 	}
 
 	message := &SIPMessage{
-		Type:    parts[0],
-		Headers: make(map[string]string),
+		Headers:    make(map[string]string),
+		IsResponse: strings.HasPrefix(requestLine, "SIP/"),
+	}
+
+	// 判断是请求还是响应
+	if message.IsResponse {
+		// 解析响应：SIP/2.0 200 OK
+		// parts[0] = "SIP/2.0"
+		// parts[1] = 状态码
+		// parts[2] = 原因短语
+		statusCode := 0
+		fmt.Sscanf(parts[1], "%d", &statusCode)
+		message.StatusCode = statusCode
+		message.Reason = parts[2]
+		message.Type = "" // 响应没有Type
+	} else {
+		// 请求: INVITE sip:xxx SIP/2.0
+		message.Type = parts[0]
 	}
 
 	// 解析头字段
@@ -184,7 +203,14 @@ func (s *Server) HandleSIPMessage(conn net.Conn, data []byte) {
 		return
 	}
 
-	// 根据消息类型进行处理
+	// 如果是响应，进行响应处理
+	if message.IsResponse {
+		log.Printf("[SIP] 收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, conn.RemoteAddr())
+		s.handleSIPResponse(conn, message)
+		return
+	}
+
+	// 根据请求类型进行处理
 	log.Printf("[SIP] 收到消息类型: %s 来自: %s", message.Type, conn.RemoteAddr())
 	switch message.Type {
 	case "REGISTER":
@@ -202,6 +228,137 @@ func (s *Server) HandleSIPMessage(conn net.Conn, data []byte) {
 	default:
 		log.Printf("[WARN] 未知的SIP消息类型: %s", message.Type)
 	}
+}
+
+// handleSIPResponse 处理SIP响应（设备对我们请求的回复）
+func (s *Server) handleSIPResponse(conn net.Conn, response *SIPMessage) {
+	callID := response.Headers["Call-ID"]
+	cseq := response.Headers["CSeq"]
+
+	log.Printf("[SIP-Response] Call-ID: %s, CSeq: %s, Status: %d", callID, cseq, response.StatusCode)
+
+	// 对于 INVITE 的 2xx 响应，需要发送 ACK
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		// 这是对 INVITE 的成功响应，需要发送 ACK
+		if strings.Contains(cseq, "INVITE") {
+			log.Printf("[SIP-Response] 对INVITE响应 %d，发送ACK", response.StatusCode)
+			s.sendACK(conn, response)
+		}
+	} else if response.StatusCode >= 300 && response.StatusCode < 400 {
+		// 3xx 重定向，暂不处理
+		log.Printf("[WARN] 收到重定向响应 %d: %s", response.StatusCode, response.Reason)
+	} else if response.StatusCode >= 400 {
+		// 4xx 或更高的错误
+		log.Printf("[WARN] 收到错误响应 %d: %s", response.StatusCode, response.Reason)
+	} else if response.StatusCode >= 100 && response.StatusCode < 200 {
+		// 1xx 临时响应（如 180 Ringing, 183 Session Progress）
+		log.Printf("[SIP-Response] 临时响应 %d: %s", response.StatusCode, response.Reason)
+		// 可以选择发送 PRACK（Provisional Acknowledgement）但GB28181不要求
+	}
+}
+
+// sendACK 发送ACK响应
+func (s *Server) sendACK(conn net.Conn, response *SIPMessage) {
+	callID := response.Headers["Call-ID"]
+	from := response.Headers["From"]
+	to := response.Headers["To"]
+	cseq := response.Headers["CSeq"]
+	via := response.Headers["Via"]
+
+	// 解析CSeq获取序列号
+	cseqParts := strings.Fields(cseq)
+	if len(cseqParts) < 2 {
+		log.Printf("[ERROR] 无效的CSeq头: %s", cseq)
+		return
+	}
+
+	// 构建ACK请求
+	// 提取To头中的请求URI（设备地址）
+	toHeader := to
+	requestURI := extractSIPURI(toHeader)
+	if requestURI == "" {
+		// 降级使用From头中的URI
+		requestURI = extractSIPURI(from)
+	}
+
+	if requestURI == "" {
+		log.Printf("[ERROR] 无法从To/From头提取URI")
+		return
+	}
+
+	// 构建ACK消息
+	ackMsg := fmt.Sprintf("ACK %s SIP/2.0\r\n", requestURI)
+	ackMsg += fmt.Sprintf("Via: %s\r\n", via)
+	ackMsg += fmt.Sprintf("From: %s\r\n", from)
+	ackMsg += fmt.Sprintf("To: %s\r\n", to)
+	ackMsg += fmt.Sprintf("Call-ID: %s\r\n", callID)
+	ackMsg += fmt.Sprintf("CSeq: %s ACK\r\n", cseqParts[0])
+	ackMsg += "Content-Length: 0\r\n\r\n"
+
+	log.Printf("[ACK] 发送ACK: %s", requestURI)
+	conn.Write([]byte(ackMsg))
+}
+
+// extractSIPURI 从SIP头中提取URI
+func extractSIPURI(header string) string {
+	// 从 <sip:xxx@xxx:5060> 格式中提取 sip:xxx@xxx:5060
+	start := strings.Index(header, "<")
+	end := strings.Index(header, ">")
+	if start >= 0 && end > start {
+		return header[start+1 : end]
+	}
+	// 如果没有尖括号，尝试直接作为URI
+	if strings.HasPrefix(header, "sip:") {
+		// 从sip:xxx@xxx:5060;tag=xxx中提取URI部分
+		parts := strings.Split(header, ";")
+		return parts[0]
+	}
+	return ""
+}
+
+// sendACKUDP 通过UDP发送ACK响应 (用于处理来自设备的响应)
+func (s *Server) sendACKUDP(remoteAddr *net.UDPAddr, response *SIPMessage) {
+	callID := response.Headers["Call-ID"]
+	from := response.Headers["From"]
+	to := response.Headers["To"]
+	cseq := response.Headers["CSeq"]
+	via := response.Headers["Via"]
+
+	// 解析CSeq获取序列号
+	cseqParts := strings.Fields(cseq)
+	if len(cseqParts) < 2 {
+		log.Printf("[ERROR] 无效的CSeq头: %s", cseq)
+		return
+	}
+
+	// 仅对 INVITE 响应发送 ACK
+	if !strings.Contains(cseq, "INVITE") {
+		return
+	}
+
+	// 对于2xx响应，构建ACK请求
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return
+	}
+
+	// 提取请求URI - 使用设备的地址
+	requestURI := extractSIPURI(from)
+	if requestURI == "" {
+		log.Printf("[ERROR] 无法从From头提取URI")
+		return
+	}
+
+	// 构建ACK消息
+	ackMsg := fmt.Sprintf("ACK %s SIP/2.0\r\n", requestURI)
+	ackMsg += fmt.Sprintf("Via: %s\r\n", via)
+	ackMsg += fmt.Sprintf("From: %s\r\n", from)
+	ackMsg += fmt.Sprintf("To: %s\r\n", to)
+	ackMsg += fmt.Sprintf("Call-ID: %s\r\n", callID)
+	ackMsg += fmt.Sprintf("CSeq: %s ACK\r\n", cseqParts[0])
+	ackMsg += "Content-Length: 0\r\n\r\n"
+
+	log.Printf("[ACK-UDP] 通过UDP发送ACK: %s", requestURI)
+	s.udpConn.WriteToUDP([]byte(ackMsg), remoteAddr)
 }
 
 // handleRegister 处理注册请求

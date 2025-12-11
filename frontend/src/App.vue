@@ -64,7 +64,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { VideoCamera, Monitor, SwitchButton, Setting, Menu as IconMenu, Connection, VideoPlay, Platform } from '@element-plus/icons-vue'
+import { VideoCamera, Monitor, SwitchButton, Setting, Menu as IconMenu, Connection, VideoPlay, Platform, FolderOpened } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const route = useRoute()

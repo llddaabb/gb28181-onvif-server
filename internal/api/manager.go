@@ -96,10 +96,10 @@ func (cm *ChannelManager) UpdateChannel(channel *Channel) error {
 
 // RecordingManager 录像管理器
 type RecordingManager struct {
-	recordings               map[string]*Recording
-	persistentRecordings     map[string]bool // 持久录像状态：channelID -> 是否启用持久录像
+	recordings                map[string]*Recording
+	persistentRecordings      map[string]bool // 持久录像状态：channelID -> 是否启用持久录像
 	persistentRecordingsMutex sync.RWMutex
-	mutex                    sync.RWMutex
+	mutex                     sync.RWMutex
 }
 
 // NewRecordingManager 创建录像管理器
@@ -155,7 +155,7 @@ func (rm *RecordingManager) GetRecordingsByDate(channelID string, date time.Time
 func (rm *RecordingManager) SetPersistentRecording(channelID string, enable bool) {
 	rm.persistentRecordingsMutex.Lock()
 	defer rm.persistentRecordingsMutex.Unlock()
-	
+
 	if enable {
 		rm.persistentRecordings[channelID] = true
 	} else {
@@ -167,7 +167,7 @@ func (rm *RecordingManager) SetPersistentRecording(channelID string, enable bool
 func (rm *RecordingManager) IsPersistentRecording(channelID string) bool {
 	rm.persistentRecordingsMutex.RLock()
 	defer rm.persistentRecordingsMutex.RUnlock()
-	
+
 	return rm.persistentRecordings[channelID]
 }
 
@@ -175,7 +175,7 @@ func (rm *RecordingManager) IsPersistentRecording(channelID string) bool {
 func (rm *RecordingManager) GetPersistentRecordings() []string {
 	rm.persistentRecordingsMutex.RLock()
 	defer rm.persistentRecordingsMutex.RUnlock()
-	
+
 	channels := make([]string, 0, len(rm.persistentRecordings))
 	for channelID, enabled := range rm.persistentRecordings {
 		if enabled {

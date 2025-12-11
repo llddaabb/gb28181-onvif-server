@@ -9,10 +9,10 @@ import (
 
 // AIRecordingManager AI录像管理器
 type AIRecordingManager struct {
-	recorders      map[string]*StreamRecorder
-	recordControl  RecordControlFunc
-	defaultConfig  DetectorConfig
-	mu             sync.RWMutex
+	recorders     map[string]*StreamRecorder
+	recordControl RecordControlFunc
+	defaultConfig DetectorConfig
+	mu            sync.RWMutex
 }
 
 // NewAIRecordingManager 创建AI录像管理器

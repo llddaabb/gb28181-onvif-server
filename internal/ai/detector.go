@@ -10,11 +10,11 @@ import (
 
 // DetectionResult AI检测结果
 type DetectionResult struct {
-	HasPerson  bool      // 是否检测到人
-	PersonCount int      // 人数
-	Confidence float32   // 置信度
-	Boxes      []BBox    // 检测框
-	Timestamp  time.Time // 检测时间
+	HasPerson   bool      // 是否检测到人
+	PersonCount int       // 人数
+	Confidence  float32   // 置信度
+	Boxes       []BBox    // 检测框
+	Timestamp   time.Time // 检测时间
 }
 
 // BBox 边界框
@@ -28,44 +28,44 @@ type BBox struct {
 type Detector interface {
 	// Detect 检测图像中是否有人
 	Detect(ctx context.Context, img image.Image) (*DetectionResult, error)
-	
+
 	// GetModelInfo 获取模型信息
 	GetModelInfo() ModelInfo
-	
+
 	// Close 关闭检测器
 	Close() error
 }
 
 // ModelInfo 模型信息
 type ModelInfo struct {
-	Name        string  // 模型名称
-	Backend     string  // 后端: cpu, cuda, opencl
-	InputSize   int     // 输入尺寸
-	Confidence  float32 // 置信度阈值
+	Name         string  // 模型名称
+	Backend      string  // 后端: cpu, cuda, opencl
+	InputSize    int     // 输入尺寸
+	Confidence   float32 // 置信度阈值
 	IoUThreshold float32 // NMS IoU阈值
 }
 
 // DetectorConfig 检测器配置
 type DetectorConfig struct {
-	ModelPath      string  `yaml:"ModelPath"`      // 模型文件路径
-	Backend        string  `yaml:"Backend"`        // cpu, cuda, opencl, auto
-	InputSize      int     `yaml:"InputSize"`      // 输入图像大小 (320, 640, 1280)
-	Confidence     float32 `yaml:"Confidence"`     // 置信度阈值 (0.0-1.0)
-	IoUThreshold   float32 `yaml:"IoUThreshold"`   // NMS IoU阈值
-	MaxBatchSize   int     `yaml:"MaxBatchSize"`   // 最大批处理大小
-	NumThreads     int     `yaml:"NumThreads"`     // CPU线程数 (0=自动)
+	ModelPath    string  `yaml:"ModelPath"`    // 模型文件路径
+	Backend      string  `yaml:"Backend"`      // cpu, cuda, opencl, auto
+	InputSize    int     `yaml:"InputSize"`    // 输入图像大小 (320, 640, 1280)
+	Confidence   float32 `yaml:"Confidence"`   // 置信度阈值 (0.0-1.0)
+	IoUThreshold float32 `yaml:"IoUThreshold"` // NMS IoU阈值
+	MaxBatchSize int     `yaml:"MaxBatchSize"` // 最大批处理大小
+	NumThreads   int     `yaml:"NumThreads"`   // CPU线程数 (0=自动)
 }
 
 // DefaultDetectorConfig 默认检测器配置
 func DefaultDetectorConfig() DetectorConfig {
 	return DetectorConfig{
-		ModelPath:     "./models/yolov8n.onnx", // 使用nano模型，最快最省资源
-		Backend:       "auto",                   // 自动选择最优后端
-		InputSize:     320,                      // 使用最小输入尺寸，降低计算量
-		Confidence:    0.5,                      // 中等置信度
-		IoUThreshold:  0.45,                     // 标准NMS阈值
-		MaxBatchSize:  1,                        // 不使用批处理
-		NumThreads:    2,                        // 限制CPU线程数
+		ModelPath:    "./models/yolov8n.onnx", // 使用nano模型，最快最省资源
+		Backend:      "auto",                  // 自动选择最优后端
+		InputSize:    320,                     // 使用最小输入尺寸，降低计算量
+		Confidence:   0.5,                     // 中等置信度
+		IoUThreshold: 0.45,                    // 标准NMS阈值
+		MaxBatchSize: 1,                       // 不使用批处理
+		NumThreads:   2,                       // 限制CPU线程数
 	}
 }
 
@@ -131,14 +131,14 @@ func (p *DetectorPool) Close() error {
 	defer p.mu.Unlock()
 
 	close(p.pool)
-	
+
 	var lastErr error
 	for _, detector := range p.detectors {
 		if err := detector.Close(); err != nil {
 			lastErr = err
 		}
 	}
-	
+
 	p.detectors = nil
 	return lastErr
 }

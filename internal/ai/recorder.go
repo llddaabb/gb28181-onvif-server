@@ -14,40 +14,40 @@ import (
 type RecordingMode string
 
 const (
-	RecordingModeManual     RecordingMode = "manual"      // 手动录像
-	RecordingModeMotion     RecordingMode = "motion"      // 移动检测录像
-	RecordingModePerson     RecordingMode = "person"      // 人形检测录像
-	RecordingModeContinuous RecordingMode = "continuous"  // 连续录像
+	RecordingModeManual     RecordingMode = "manual"     // 手动录像
+	RecordingModeMotion     RecordingMode = "motion"     // 移动检测录像
+	RecordingModePerson     RecordingMode = "person"     // 人形检测录像
+	RecordingModeContinuous RecordingMode = "continuous" // 连续录像
 )
 
 // StreamRecorder 流录像控制器
 type StreamRecorder struct {
-	channelID      string
-	streamURL      string
-	mode           RecordingMode
-	detector       *DetectorPool
-	frameGrabber   *FrameGrabber
-	recordControl  RecordControlFunc
-	
+	channelID     string
+	streamURL     string
+	mode          RecordingMode
+	detector      *DetectorPool
+	frameGrabber  *FrameGrabber
+	recordControl RecordControlFunc
+
 	// 检测参数
 	detectInterval time.Duration // 检测间隔
 	recordDelay    time.Duration // 录像延迟（检测到人后继续录多久）
 	minRecordTime  time.Duration // 最小录像时长
-	
+
 	// 状态
-	isRecording    bool
-	lastDetectTime time.Time
-	lastPersonTime time.Time
+	isRecording     bool
+	lastDetectTime  time.Time
+	lastPersonTime  time.Time
 	recordStartTime time.Time
-	
+
 	// 控制
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	mu             sync.RWMutex
-	
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	mu     sync.RWMutex
+
 	// 统计
-	stats          RecordingStats
+	stats RecordingStats
 }
 
 // RecordingStats 录像统计
@@ -65,14 +65,14 @@ type RecordControlFunc func(channelID string, start bool) error
 
 // RecorderConfig 录像器配置
 type RecorderConfig struct {
-	ChannelID      string             `yaml:"ChannelID"`
-	StreamURL      string             `yaml:"StreamURL"`     // 流地址
-	Mode           RecordingMode      `yaml:"Mode"`
-	DetectInterval time.Duration      `yaml:"DetectInterval"` // 检测间隔(秒)
-	RecordDelay    time.Duration      `yaml:"RecordDelay"`    // 录像延迟(秒)
-	MinRecordTime  time.Duration      `yaml:"MinRecordTime"`  // 最小录像时长(秒)
-	DetectorConfig DetectorConfig     `yaml:"DetectorConfig"`
-	FFmpegBin      string             `yaml:"FFmpegBin"`      // FFmpeg路径
+	ChannelID      string         `yaml:"ChannelID"`
+	StreamURL      string         `yaml:"StreamURL"` // 流地址
+	Mode           RecordingMode  `yaml:"Mode"`
+	DetectInterval time.Duration  `yaml:"DetectInterval"` // 检测间隔(秒)
+	RecordDelay    time.Duration  `yaml:"RecordDelay"`    // 录像延迟(秒)
+	MinRecordTime  time.Duration  `yaml:"MinRecordTime"`  // 最小录像时长(秒)
+	DetectorConfig DetectorConfig `yaml:"DetectorConfig"`
+	FFmpegBin      string         `yaml:"FFmpegBin"` // FFmpeg路径
 }
 
 // DefaultRecorderConfig 默认录像器配置
@@ -206,8 +206,8 @@ func (r *StreamRecorder) performDetection() {
 		r.stats.PersonDetections++
 		r.stats.LastPersonTime = time.Now()
 		r.lastPersonTime = time.Now()
-		
-		debug.Info("ai", "检测到 %d 个人: channelID=%s, confidence=%.2f", 
+
+		debug.Info("ai", "检测到 %d 个人: channelID=%s, confidence=%.2f",
 			result.PersonCount, r.channelID, result.Confidence)
 	}
 

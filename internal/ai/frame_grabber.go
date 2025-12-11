@@ -34,7 +34,7 @@ func NewFrameGrabber(streamURL string, ffmpegBin string) *FrameGrabber {
 func (g *FrameGrabber) CaptureFrame(ctx context.Context) (image.Image, error) {
 	// 使用ffmpeg捕获单帧
 	// ffmpeg -i <stream_url> -vframes 1 -f image2pipe -vcodec mjpeg -
-	
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -68,7 +68,7 @@ func (g *FrameGrabber) CaptureFrame(ctx context.Context) (image.Image, error) {
 // CaptureFrameScaled 捕获并缩放帧
 func (g *FrameGrabber) CaptureFrameScaled(ctx context.Context, width, height int) (image.Image, error) {
 	// ffmpeg -i <stream_url> -vframes 1 -vf scale=320:320 -f image2pipe -vcodec mjpeg -
-	
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

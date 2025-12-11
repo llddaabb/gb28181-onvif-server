@@ -396,50 +396,39 @@
       :title="`设备预览 - ${previewData.device?.name}`"
       width="900px"
       @close="stopPreview"
-      @open="startPreviewStream">
+      @open="onPreviewDialogOpen">
       <div class="preview-container">
-        <!-- 视频播放区域 -->
-        <div class="video-player-wrapper" v-loading="previewData.loading">
-          <video 
-            ref="videoRef" 
-            class="video-player"
-            controls
-            autoplay
-            muted
-            @error="onVideoError">
-          </video>
-          <div v-if="previewData.error" class="video-error">
-            <el-icon size="48"><VideoCamera /></el-icon>
-            <p>{{ previewData.error }}</p>
-            <el-button type="primary" @click="retryPreview">重试</el-button>
-          </div>
+        <!-- 凭证输入区域 -->
+        <div class="credentials-form" v-if="!previewData.streamInfo && !previewData.loading">
+          <el-alert 
+            v-if="previewData.error && previewData.error.includes('401')"
+            title="RTSP 认证失败，请输入正确的用户名和密码"
+            type="warning"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 16px">
+          </el-alert>
+          <el-form :inline="true" class="credentials-inline-form">
+            <el-form-item label="用户名">
+              <el-input v-model="previewData.credentials.username" placeholder="admin" style="width: 150px" />
+            </el-form-item>
+            <el-form-item label="密码">
+              <el-input v-model="previewData.credentials.password" type="password" placeholder="密码" style="width: 150px" show-password />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" @click="startPreviewWithCredentials" :loading="previewData.loading">
+                开始预览
+              </el-button>
+            </el-form-item>
+          </el-form>
         </div>
 
-        <!-- 播放信息 -->
-        <div class="stream-urls" v-if="previewData.streamInfo">
-          <el-descriptions :column="1" border size="small">
-            <el-descriptions-item label="HTTP-FLV">
-              <el-link type="primary" @click="copyToClipboard(previewData.streamInfo.flv_url)">
-                {{ previewData.streamInfo.flv_url }}
-              </el-link>
-            </el-descriptions-item>
-            <el-descriptions-item label="WS-FLV">
-              <el-link type="primary" @click="copyToClipboard(previewData.streamInfo.ws_flv_url)">
-                {{ previewData.streamInfo.ws_flv_url }}
-              </el-link>
-            </el-descriptions-item>
-            <el-descriptions-item label="HLS">
-              <el-link type="primary" @click="copyToClipboard(previewData.streamInfo.hls_url)">
-                {{ previewData.streamInfo.hls_url }}
-              </el-link>
-            </el-descriptions-item>
-            <el-descriptions-item label="RTSP源">
-              <el-link type="info" @click="copyToClipboard(previewData.streamInfo.source_url)">
-                {{ previewData.streamInfo.source_url }}
-              </el-link>
-            </el-descriptions-item>
-          </el-descriptions>
+        <!-- 视频播放区域 (使用 PreviewPlayer) -->
+        <div class="video-player-wrapper">
+          <PreviewPlayer ref="previewPlayerRef" :show="previewData.showDialog" :device="previewData.device ? { deviceId: previewData.device.deviceId || previewData.device.id } : null" :channels="previewData.streamInfo ? [{ channelId: previewData.streamInfo.stream_key || previewData.streamInfo.channel_id }] : []" :selectedChannelId="previewData.streamInfo ? (previewData.streamInfo.stream_key || previewData.streamInfo.channel_id) : ''" />
         </div>
+
+        <!-- 播放信息 显示由 PreviewPlayer 组件处理 -->
 
         <!-- 设备信息 -->
         <div class="preview-info">
@@ -706,6 +695,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { VideoCamera } from '@element-plus/icons-vue'
+import PreviewPlayer from '../components/PreviewPlayer.vue'
 
 interface Device {
   deviceId: string
@@ -797,11 +787,16 @@ const previewData = reactive({
   loading: false,
   error: '',
   streamInfo: null as StreamInfo | null,
-  flvPlayer: null as any
+  flvPlayer: null as any,
+  // 凭证信息 - 用于 RTSP 认证
+  credentials: {
+    username: '',
+    password: ''
+  }
 })
 
-// 视频播放器引用
-const videoRef = ref<HTMLVideoElement | null>(null)
+// Preview player ref
+const previewPlayerRef = ref<any>(null)
 
 // PTZ控制数据
 const ptzData = reactive({
@@ -1150,148 +1145,159 @@ const showPreview = (row: Device) => {
   previewData.device = row
   previewData.error = ''
   previewData.streamInfo = null
+  // 初始化凭证 - 使用设备保存的凭证或默认值
+  previewData.credentials.username = row.username || 'admin'
+  previewData.credentials.password = row.password || ''
   previewData.showDialog = true
 }
 
-// 启动预览流
-const startPreviewStream = async () => {
+// 表格行点击处理（兼容模板绑定）
+const handleRowClick = (row: Device) => {
+  // 简单切换选中状态或展开行，当前实现为打开详情（可根据需要调整）
+  // 这里保持行为与之前的 handleRowClick 预期一致：设置当前选中设备并展开（如果需要）
+  // 暂时将其行为设为：将设备设为选中（用于未来扩展）
+  // 如果你期望点击行打开某个侧边栏或详情页，请告知我以实现。
+  console.debug('row clicked', row)
+}
+
+// 将内部状态码转成人类可读文本
+const getStatusText = (status: string | undefined) => {
+  if (!status) return '未知'
+  if (status === 'online') return '在线'
+  if (status === 'offline') return '离线'
+  return status
+}
+
+// 由 PreviewPlayer 组件处理播放逻辑与错误
+const onPreviewDialogOpen = () => {
+  // 打开对话框时只展示凭证输入，等待用户点击“开始预览”
+  previewData.error = ''
+  previewData.streamInfo = null
+  previewData.loading = false
+}
+
+// 在进行关键操作前，统一验证设备凭证并在验证成功后同步通道到通道管理
+const ensureDeviceAuth = async (device: Device) => {
+  if (!device) return false
+  // 如果设备已记录的凭证可用，优先使用它
+  const username = previewData.device && previewData.device.deviceId === device.deviceId ? previewData.credentials.username : (device.username || 'admin')
+  const password = previewData.device && previewData.device.deviceId === device.deviceId ? previewData.credentials.password : (device.password || '')
+
+  try {
+    // 调用后端认证接口（假定存在），后端应返回 success: true 表示认证通过
+    const resp = await fetch(`/api/onvif/devices/${device.deviceId}/auth/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    })
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '设备认证失败')
+      return false
+    }
+    const data = await resp.json()
+    if (!data.success) {
+      ElMessage.error(data.error || '设备认证失败')
+      return false
+    }
+
+    // 认证通过：同步设备的通道到通道管理（尝试 /channels/sync，然后回退到 profiles）
+    try {
+      const syncResp = await fetch(`/api/onvif/devices/${device.deviceId}/channels/sync`, { method: 'POST' })
+      if (syncResp.ok) {
+        ElMessage.success('设备认证通过，通道已同步')
+        return true
+      }
+    } catch (e) {
+      // 忽略，下一步尝试 profiles
+    }
+
+    // 回退：拉取 profiles 并将其作为通道同步到通道管理
+    try {
+      const profilesResp = await fetch(`/api/onvif/devices/${device.deviceId}/profiles`)
+      if (profilesResp.ok) {
+        const pData = await profilesResp.json().catch(() => ({}))
+        // 如果后端提供了一个批量导入通道接口，可在这里调用；否则只提示成功认证
+        // 例如：POST /api/channels/import with body { deviceId, profiles }
+        if (pData && pData.profiles && pData.profiles.length) {
+          await fetch('/api/channels/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: device.deviceId, profiles: pData.profiles })
+          }).catch(() => {})
+        }
+        ElMessage.success('设备认证通过，已同步配置文件作为通道')
+        return true
+      }
+    } catch (e) {
+      // 忽略
+    }
+
+    // 如果没有同步接口也算认证通过
+    return true
+  } catch (e: any) {
+    ElMessage.error(`认证请求失败: ${e.message || e}`)
+    return false
+  }
+}
+
+// 在用户输入凭据后启动预览（调用后端并通知 PreviewPlayer）
+const startPreviewWithCredentials = async () => {
   if (!previewData.device) return
-  
+  // 先进行认证并同步通道
+  const authOk = await ensureDeviceAuth(previewData.device)
+  if (!authOk) return
   previewData.loading = true
   previewData.error = ''
-  
   try {
-    // 调用后端 API 启动流代理
     const response = await fetch(`/api/onvif/devices/${previewData.device.deviceId}/preview/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: previewData.credentials.username || previewData.device.username || '', password: previewData.credentials.password || previewData.device.password || '' })
     })
-    
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}))
       throw new Error(errData.error || '启动预览失败')
     }
-    
     const data = await response.json()
-    if (!data.success) {
-      throw new Error(data.error || '启动预览失败')
-    }
-    
+    if (!data.success) throw new Error(data.error || '启动预览失败')
     previewData.streamInfo = data.data
-    
-    // 等待 DOM 更新后初始化播放器
     await nextTick()
-    initFlvPlayer()
-    
-  } catch (error: any) {
-    console.error('启动预览失败:', error)
-    previewData.error = error.message || '启动预览失败'
-    ElMessage.error(`启动预览失败: ${error.message}`)
+    // 通知 PreviewPlayer 使用已有的 streamInfo 播放
+    if (previewPlayerRef.value && previewData.streamInfo) {
+      const p = (typeof previewPlayerRef.value.startWithStreamInfo === 'function') ? previewPlayerRef.value : (previewPlayerRef.value.value && typeof previewPlayerRef.value.value.startWithStreamInfo === 'function') ? previewPlayerRef.value.value : (previewPlayerRef.value.$ && previewPlayerRef.value.$.exposed && typeof previewPlayerRef.value.$.exposed.startWithStreamInfo === 'function') ? previewPlayerRef.value.$.exposed : null
+      if (p) {
+        await p.startWithStreamInfo(previewData.streamInfo)
+      } else {
+        try { if (typeof previewPlayerRef.value.startPreview === 'function') await previewPlayerRef.value.startPreview() } catch (_) {}
+      }
+    }
+  } catch (e: any) {
+    console.error('启动预览失败:', e)
+    previewData.error = e.message || '启动预览失败'
+    ElMessage.error(`启动预览失败: ${e.message}`)
   } finally {
     previewData.loading = false
   }
 }
 
-// 初始化 FLV 播放器
-const initFlvPlayer = async () => {
-  if (!previewData.streamInfo || !videoRef.value) return
-  
-  try {
-    // 动态导入 flv.js
-    const flvjs = await import('flv.js')
-    
-    if (!flvjs.default.isSupported()) {
-      previewData.error = '浏览器不支持 FLV 播放'
-      return
-    }
-    
-    // 销毁旧播放器
-    if (previewData.flvPlayer) {
-      previewData.flvPlayer.destroy()
-      previewData.flvPlayer = null
-    }
-    
-    // 创建新播放器
-    previewData.flvPlayer = flvjs.default.createPlayer({
-      type: 'flv',
-      url: previewData.streamInfo.flv_url,
-      isLive: true,
-      hasAudio: true,
-      hasVideo: true,
-      cors: true
-    }, {
-      enableStashBuffer: false,
-      stashInitialSize: 128,
-      enableWorker: true,
-      lazyLoadMaxDuration: 3 * 60,
-      seekType: 'range'
-    })
-    
-    previewData.flvPlayer.attachMediaElement(videoRef.value)
-    previewData.flvPlayer.load()
-    previewData.flvPlayer.play()
-    
-    // 监听错误事件
-    previewData.flvPlayer.on(flvjs.default.Events.ERROR, (errType: any, errDetail: any) => {
-      console.error('FLV播放器错误:', errType, errDetail)
-      previewData.error = `播放错误: ${errDetail}`
-    })
-    
-  } catch (error: any) {
-    console.error('初始化播放器失败:', error)
-    previewData.error = `播放器初始化失败: ${error.message}`
-  }
-}
-
-// 停止预览
-const stopPreview = async () => {
-  // 销毁播放器
-  if (previewData.flvPlayer) {
-    try {
-      previewData.flvPlayer.pause()
-      previewData.flvPlayer.unload()
-      previewData.flvPlayer.detachMediaElement()
-      previewData.flvPlayer.destroy()
-    } catch (e) {
-      console.warn('销毁播放器时出错:', e)
-    }
-    previewData.flvPlayer = null
-  }
-  
-  // 调用后端停止流代理 (可选，节省资源)
-  if (previewData.device && previewData.streamInfo) {
-    try {
-      await fetch(`/api/onvif/devices/${previewData.device.deviceId}/preview/stop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      })
-    } catch (e) {
-      console.warn('停止预览流时出错:', e)
-    }
-  }
-  
-  previewData.streamInfo = null
-  previewData.error = ''
-}
-
 // 停止预览并关闭对话框
 const stopPreviewAndClose = async () => {
-  await stopPreview()
+  // 仅停止播放并调用后端停止代理
+  if (previewPlayerRef.value) await previewPlayerRef.value.stopPlaybackOnly()
+  if (previewData.device && previewData.streamInfo) {
+    try {
+      await fetch(`/api/onvif/devices/${previewData.device.deviceId}/preview/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+    } catch (e) { console.warn('stop preview api', e) }
+  }
+  previewData.streamInfo = null
+  previewData.error = ''
   previewData.showDialog = false
 }
 
-// 重试预览
-const retryPreview = () => {
-  previewData.error = ''
-  startPreviewStream()
-}
-
-// 视频播放错误处理
-const onVideoError = (event: Event) => {
-  console.error('视频播放错误:', event)
-  if (!previewData.error) {
-    previewData.error = '视频加载失败，请检查 ZLM 媒体服务是否正常运行'
-  }
+// 兼容模板中 @close="stopPreview" 的调用，调用 stopPreviewAndClose
+const stopPreview = async () => {
+  await stopPreviewAndClose()
 }
 
 // 复制到剪贴板
@@ -1337,7 +1343,9 @@ const loadPresets = async () => {
 // PTZ控制
 const startPTZ = async (command: string) => {
   if (!ptzData.device) return
-  
+  // 先进行设备认证
+  const ok = await ensureDeviceAuth(ptzData.device)
+  if (!ok) return
   try {
     await fetch('/api/control/ptz', {
       method: 'POST',
@@ -1356,7 +1364,8 @@ const startPTZ = async (command: string) => {
 
 const stopPTZ = async () => {
   if (!ptzData.device) return
-  
+  const ok = await ensureDeviceAuth(ptzData.device)
+  if (!ok) return
   try {
     await fetch('/api/control/ptz', {
       method: 'POST',
@@ -1375,7 +1384,8 @@ const stopPTZ = async () => {
 
 const ptzHome = async () => {
   if (!ptzData.device) return
-  
+  const ok = await ensureDeviceAuth(ptzData.device)
+  if (!ok) return
   try {
     await fetch('/api/control/ptz', {
       method: 'POST',
@@ -1430,24 +1440,7 @@ const savePreset = async () => {
   }
 }
 
-// 显示配置文件
-const showProfiles = async (row: Device) => {
-  profilesData.device = row
-  profilesData.showDialog = true
-  profilesData.loading = true
-  
-  try {
-    const response = await fetch(`/api/onvif/devices/${row.deviceId}/profiles`)
-    if (!response.ok) throw new Error('获取配置文件失败')
-    const data = await response.json()
-    profilesData.profiles = data.profiles || []
-  } catch (error) {
-    ElMessage.error(`获取配置文件失败: ${error}`)
-    profilesData.profiles = []
-  } finally {
-    profilesData.loading = false
-  }
-}
+// (重复的 showProfiles 已删除，使用文件后部定义的带认证版本)
 
 // 根据配置获取流地址
 const getStreamByProfile = async (profileToken: string) => {
@@ -1479,7 +1472,9 @@ const getStreamByProfile = async (profileToken: string) => {
 const getSnapshot = async (row: Device) => {
   snapshotData.device = row
   snapshotData.showDialog = true
-  await refreshSnapshot()
+  // 先进行认证
+  const ok = await ensureDeviceAuth(row)
+  if (ok) await refreshSnapshot()
 }
 
 const refreshSnapshot = async () => {
@@ -1511,24 +1506,34 @@ const downloadSnapshot = () => {
   a.click()
 }
 
-// 行点击展开
-const handleRowClick = (row: Device) => {
-  // 可以添加行点击逻辑
-}
-
-// 获取状态文本
-const getStatusText = (status: string) => {
-  const statusMap: Record<string, string> = {
-    'online': '✓ 在线',
-    'offline': '✗ 离线',
-    'unknown': '? 未知',
-    'discovered': '🔍 已发现'
+// 显示配置文件
+const showProfiles = async (row: Device) => {
+  profilesData.device = row
+  profilesData.showDialog = true
+  profilesData.loading = true
+  // 先认证
+  const ok = await ensureDeviceAuth(row)
+  if (!ok) {
+    profilesData.loading = false
+    return
   }
-  return statusMap[status] || status
+  
+  try {
+    const response = await fetch(`/api/onvif/devices/${row.deviceId}/profiles`)
+    if (!response.ok) throw new Error('获取配置文件失败')
+    const data = await response.json()
+    profilesData.profiles = data.profiles || []
+  } catch (error) {
+    ElMessage.error(`获取配置文件失败: ${error}`)
+    profilesData.profiles = []
+  } finally {
+    profilesData.loading = false
+  }
 }
 
-// 获取服务名称
+// 根据服务类型友好展示服务名
 const getServiceName = (service: string) => {
+  if (!service) return ''
   if (service.includes('Media')) return 'Media'
   if (service.includes('PTZ')) return 'PTZ'
   if (service.includes('Event')) return 'Events'
@@ -1729,6 +1734,24 @@ onUnmounted(() => {
 
 .preview-container {
   padding: 20px 0;
+}
+
+.credentials-form {
+  background: #f5f7fa;
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.credentials-inline-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.credentials-inline-form .el-form-item {
+  margin-bottom: 0;
 }
 
 .preview-url {

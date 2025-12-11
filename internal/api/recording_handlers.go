@@ -60,7 +60,7 @@ func (s *Server) handleListZLMRecordings(w http.ResponseWriter, r *http.Request)
 	if dateStr != "" {
 		targetDate = dateStr
 		datePath := filepath.Join(channelRecordPath, targetDate)
-		
+
 		if info, err := os.Stat(datePath); err == nil && info.IsDir() {
 			recordings = scanDateDirectory(datePath, app, channelId, targetDate)
 		}
@@ -178,9 +178,9 @@ func parseRecordingFileName(fileName, date string) (startTime, endTime, duration
 		timeStr := fmt.Sprintf("%s-%s-%s %s:%s:%s",
 			parts[0], parts[1], parts[2], // 日期
 			parts[3], parts[4], parts[5]) // 时间
-		
+
 		startTime = timeStr
-		
+
 		// 尝试解析为时间对象计算结束时间（假设每个文件最多1小时）
 		if t, err := time.Parse("2006-01-02 15:04:05", timeStr); err == nil {
 			// 简单假设录像时长，实际应该从文件元数据获取
@@ -237,7 +237,7 @@ func (s *Server) handlePlayZLMRecording(w http.ResponseWriter, r *http.Request) 
 	// 获取相对于www目录的路径用于ZLM访问
 	// ZLM可以通过 /record/{app}/{stream}/{date}/{file} 访问录像文件
 	relPath, _ := filepath.Rel(filepath.Join(workDir, "www"), filePath)
-	
+
 	// 获取 ZLM HTTP 端口
 	zlmHost := "127.0.0.1"
 	zlmHTTPPort := 8080
@@ -248,26 +248,26 @@ func (s *Server) handlePlayZLMRecording(w http.ResponseWriter, r *http.Request) 
 	// 构造多种播放 URL
 	// 1. HTTP直接访问MP4文件（可能浏览器不支持某些编码）
 	mp4URL := fmt.Sprintf("http://%s:%d/%s", zlmHost, zlmHTTPPort, strings.ReplaceAll(relPath, "\\", "/"))
-	
+
 	// 2. HTTP-FLV流（需要通过addStreamProxy创建）
 	// 生成唯一的回放流ID
 	playbackStreamID := fmt.Sprintf("playback_%s_%d", stream, time.Now().Unix())
-	
+
 	// 使用ZLM API创建流代理（将MP4文件作为输入源）
 	flvURL := fmt.Sprintf("http://%s:%d/%s/%s.live.flv", zlmHost, zlmHTTPPort, app, playbackStreamID)
-	
+
 	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":         true,
-		"mp4Url":          mp4URL,
-		"flvUrl":          flvURL,
-		"playUrl":         mp4URL, // 默认返回MP4直接访问
-		"playbackStream":  playbackStreamID,
-		"filePath":        filePath,
-		"relativePath":    relPath,
-		"app":             app,
-		"stream":          stream,
-		"fileName":        fileName,
-		"note":            "如浏览器无法播放MP4，请使用VLC等播放器",
+		"success":        true,
+		"mp4Url":         mp4URL,
+		"flvUrl":         flvURL,
+		"playUrl":        mp4URL, // 默认返回MP4直接访问
+		"playbackStream": playbackStreamID,
+		"filePath":       filePath,
+		"relativePath":   relPath,
+		"app":            app,
+		"stream":         stream,
+		"fileName":       fileName,
+		"note":           "如浏览器无法播放MP4，请使用VLC等播放器",
 	})
 }
 

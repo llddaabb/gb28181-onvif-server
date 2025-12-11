@@ -16,6 +16,24 @@ import (
 	"time"
 )
 
+// Regular expressions for parsing SOAP responses, compiled once for performance.
+var (
+	reManufacturer    = regexp.MustCompile(`<[^:]*:?Manufacturer[^>]*>([^<]+)</[^:]*:?Manufacturer>`)
+	reModel           = regexp.MustCompile(`<[^:]*:?Model[^>]*>([^<]+)</[^:]*:?Model>`)
+	reFirmwareVersion = regexp.MustCompile(`<[^:]*:?FirmwareVersion[^>]*>([^<]+)</[^:]*:?FirmwareVersion>`)
+	reSerialNumber    = regexp.MustCompile(`<[^:]*:?SerialNumber[^>]*>([^<]+)</[^:]*:?SerialNumber>`)
+	reHardwareID      = regexp.MustCompile(`<[^:]*:?HardwareId[^>]*>([^<]+)</[^:]*:?HardwareId>`)
+	reURI             = regexp.MustCompile(`<[^:]*:?Uri>([^<]+)</[^:]*:?Uri>`)
+	rePresetToken     = regexp.MustCompile(`<[^:]*:?PresetToken>([^<]+)</[^:]*:?PresetToken>`)
+	reFaultString     = regexp.MustCompile(`<[^:]*:?(?:faultstring|Text)>([^<]+)</`)
+	reProfileToken    = regexp.MustCompile(`<[^:]*:?Profiles[^>]*token="([^"]+)"[^>]*>`)
+	reProfileName     = regexp.MustCompile(`<[^:]*:?Name>([^<]+)</[^:]*:?Name>`)
+	reProfileEncoding = regexp.MustCompile(`<[^:]*:?Encoding>([^<]+)</[^:]*:?Encoding>`)
+	reProfileWidth    = regexp.MustCompile(`<[^:]*:?Width>([^<]+)</[^:]*:?Width>`)
+	reProfileHeight   = regexp.MustCompile(`<[^:]*:?Height>([^<]+)</[^:]*:?Height>`)
+	rePresetItemToken = regexp.MustCompile(`<[^:]*:?Preset[^>]*token="([^"]+)"`)
+)
+
 // ONVIFDevice ONVIF设备客户端 - 真实ONVIF协议实现
 type ONVIFDevice struct {
 	xaddr        string
@@ -314,27 +332,18 @@ func (d *ONVIFDevice) GetDeviceInfo() (map[string]string, error) {
 
 	info := make(map[string]string)
 
-	// 解析设备信息
-	extractValue := func(tag string) string {
-		pattern := fmt.Sprintf("<%s[^>]*>([^<]+)</%s>", tag, tag)
-		re := regexp.MustCompile(pattern)
+	extractValue := func(re *regexp.Regexp) string {
 		if match := re.FindSubmatch(resp); len(match) > 1 {
-			return string(match[1])
-		}
-		// 尝试不带命名空间的标签
-		pattern2 := fmt.Sprintf(":<%s[^>]*>([^<]+)</%s>", tag, tag)
-		re2 := regexp.MustCompile(pattern2)
-		if match := re2.FindSubmatch(resp); len(match) > 1 {
 			return string(match[1])
 		}
 		return ""
 	}
 
-	info["Manufacturer"] = extractValue("Manufacturer")
-	info["Model"] = extractValue("Model")
-	info["FirmwareVersion"] = extractValue("FirmwareVersion")
-	info["SerialNumber"] = extractValue("SerialNumber")
-	info["HardwareId"] = extractValue("HardwareId")
+	info["Manufacturer"] = extractValue(reManufacturer)
+	info["Model"] = extractValue(reModel)
+	info["FirmwareVersion"] = extractValue(reFirmwareVersion)
+	info["SerialNumber"] = extractValue(reSerialNumber)
+	info["HardwareId"] = extractValue(reHardwareID)
 
 	// 设置默认值
 	if info["Manufacturer"] == "" {
@@ -375,15 +384,9 @@ func (d *ONVIFDevice) parseMediaProfiles(resp []byte) []MediaProfile {
 	var profiles []MediaProfile
 	respStr := string(resp)
 
-	// 使用正则提取Profile信息
-	profilePattern := regexp.MustCompile(`<[^:]*:?Profiles[^>]*token="([^"]+)"[^>]*>`)
-	namePattern := regexp.MustCompile(`<[^:]*:?Name>([^<]+)</[^:]*:?Name>`)
-	encodingPattern := regexp.MustCompile(`<[^:]*:?Encoding>([^<]+)</[^:]*:?Encoding>`)
-	widthPattern := regexp.MustCompile(`<[^:]*:?Width>([^<]+)</[^:]*:?Width>`)
-	heightPattern := regexp.MustCompile(`<[^:]*:?Height>([^<]+)</[^:]*:?Height>`)
-
-	profileMatches := profilePattern.FindAllStringSubmatch(respStr, -1)
-	nameMatches := namePattern.FindAllStringSubmatch(respStr, -1)
+	profileMatches := reProfileToken.FindAllStringSubmatch(respStr, -1)
+	// 注意：这里的解析逻辑假设名称、编码等信息在XML中出现的顺序与Profile一一对应，这可能不总是可靠。
+	nameMatches := reProfileName.FindAllStringSubmatch(respStr, -1)
 
 	for i, match := range profileMatches {
 		if len(match) < 2 {
@@ -401,15 +404,15 @@ func (d *ONVIFDevice) parseMediaProfiles(resp []byte) []MediaProfile {
 		}
 
 		// 提取编码信息
-		if encMatch := encodingPattern.FindStringSubmatch(respStr); len(encMatch) > 1 {
+		if encMatch := reProfileEncoding.FindStringSubmatch(respStr); len(encMatch) > 1 {
 			profile.Encoding = encMatch[1]
 		}
 
 		// 提取分辨率
-		if widthMatch := widthPattern.FindStringSubmatch(respStr); len(widthMatch) > 1 {
+		if widthMatch := reProfileWidth.FindStringSubmatch(respStr); len(widthMatch) > 1 {
 			profile.Width, _ = strconv.Atoi(widthMatch[1])
 		}
-		if heightMatch := heightPattern.FindStringSubmatch(respStr); len(heightMatch) > 1 {
+		if heightMatch := reProfileHeight.FindStringSubmatch(respStr); len(heightMatch) > 1 {
 			profile.Height, _ = strconv.Atoi(heightMatch[1])
 		}
 
@@ -438,6 +441,17 @@ func (d *ONVIFDevice) GetStreamURI(profileToken string) (string, error) {
 		mediaURL = strings.TrimSuffix(d.xaddr, "/onvif/device_service") + "/onvif/media_service"
 	}
 
+	// --- 优化点：在获取流地址前，先验证凭据 ---
+	// 调用一个轻量级的、需要认证的请求来测试凭据是否有效。
+	// 如果验证失败，直接返回错误，而不是一个无法播放的URL。
+	_, err := d.GetSystemDateAndTime()
+	if err != nil {
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "not authorized") || strings.Contains(errMsg, "unauthorized") {
+			return "", fmt.Errorf("凭据无效 (用户名或密码错误)")
+		}
+	}
+
 	body := fmt.Sprintf(`<trt:GetStreamUri xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
 		<trt:StreamSetup>
 			<tt:Stream xmlns:tt="http://www.onvif.org/ver10/schema">RTP-Unicast</tt:Stream>
@@ -455,8 +469,7 @@ func (d *ONVIFDevice) GetStreamURI(profileToken string) (string, error) {
 	}
 
 	// 解析响应中的URI
-	uriPattern := regexp.MustCompile(`<[^:]*:?Uri>([^<]+)</[^:]*:?Uri>`)
-	if match := uriPattern.FindSubmatch(resp); len(match) > 1 {
+	if match := reURI.FindSubmatch(resp); len(match) > 1 {
 		rtspURL := string(match[1])
 		// 添加认证信息
 		return d.addAuthToURL(rtspURL), nil
@@ -483,14 +496,18 @@ func (d *ONVIFDevice) buildDefaultStreamURI(profileToken string) (string, error)
 		channel = "103"
 	}
 
+	// 强制使用TCP模式拉流，可以显著提高在复杂网络环境（如NAT、防火墙）下的成功率
+	// ZLM的addStreamProxy接口通过 `rtsp_transport=tcp` 参数来指定
+	rtspTransportParam := "?rtsp_transport=tcp"
+
 	var rtspURL string
 	if d.username != "" && d.password != "" {
-		rtspURL = fmt.Sprintf("rtsp://%s:%s@%s:%s/Streaming/Channels/%s",
+		rtspURL = fmt.Sprintf("rtsp://%s:%s@%s:%s/Streaming/Channels/%s%s",
 			url.QueryEscape(d.username),
 			url.QueryEscape(d.password),
-			host, port, channel)
+			host, port, channel, rtspTransportParam)
 	} else {
-		rtspURL = fmt.Sprintf("rtsp://%s:%s/Streaming/Channels/%s", host, port, channel)
+		rtspURL = fmt.Sprintf("rtsp://%s:%s/Streaming/Channels/%s%s", host, port, channel, rtspTransportParam)
 	}
 
 	return rtspURL, nil
@@ -528,8 +545,7 @@ func (d *ONVIFDevice) GetSnapshotURI(profileToken string) (string, error) {
 	}
 
 	// 解析响应中的URI
-	uriPattern := regexp.MustCompile(`<[^:]*:?Uri>([^<]+)</[^:]*:?Uri>`)
-	if match := uriPattern.FindSubmatch(resp); len(match) > 1 {
+	if match := reURI.FindSubmatch(resp); len(match) > 1 {
 		snapshotURL := string(match[1])
 		return d.addAuthToURL(snapshotURL), nil
 	}
@@ -786,11 +802,8 @@ func (d *ONVIFDevice) parsePresets(resp []byte) []PTZPreset {
 	var presets []PTZPreset
 	respStr := string(resp)
 
-	tokenPattern := regexp.MustCompile(`<[^:]*:?Preset[^>]*token="([^"]+)"`)
-	namePattern := regexp.MustCompile(`<[^:]*:?Name>([^<]+)</[^:]*:?Name>`)
-
-	tokenMatches := tokenPattern.FindAllStringSubmatch(respStr, -1)
-	nameMatches := namePattern.FindAllStringSubmatch(respStr, -1)
+	tokenMatches := rePresetItemToken.FindAllStringSubmatch(respStr, -1)
+	nameMatches := reProfileName.FindAllStringSubmatch(respStr, -1)
 
 	for i, match := range tokenMatches {
 		if len(match) < 2 {
@@ -856,8 +869,7 @@ func (d *ONVIFDevice) SetPreset(profileToken, presetName, presetToken string) (s
 	}
 
 	// 解析返回的预置位Token
-	tokenPattern := regexp.MustCompile(`<[^:]*:?PresetToken>([^<]+)</[^:]*:?PresetToken>`)
-	if match := tokenPattern.FindSubmatch(resp); len(match) > 1 {
+	if match := rePresetToken.FindSubmatch(resp); len(match) > 1 {
 		return string(match[1]), nil
 	}
 
@@ -985,8 +997,7 @@ func (d *ONVIFDevice) sendSOAPRequest(serviceURL, action, body string) ([]byte, 
 
 // extractFaultString 提取SOAP错误信息
 func extractFaultString(resp []byte) string {
-	pattern := regexp.MustCompile(`<[^:]*:?(?:faultstring|Text)>([^<]+)</`)
-	if match := pattern.FindSubmatch(resp); len(match) > 1 {
+	if match := reFaultString.FindSubmatch(resp); len(match) > 1 {
 		return string(match[1])
 	}
 	return "未知错误"

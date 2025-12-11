@@ -1,0 +1,184 @@
+GB28181:
+    SipIP: 0.0.0.0
+    SipPort: 5060
+    Realm: "3402000000"
+    ServerID: "34020000002000000001"
+    Password: ""
+    HeartbeatInterval: 60
+    RegisterExpires: 3600
+ONVIF:
+    DiscoveryInterval: 60
+    MediaPortRange: 8000-9000
+API:
+    Host: 0.0.0.0
+    Port: 9080
+    CorsAllowOrigins:
+        - '*'
+Debug:
+    Enabled: true
+    LogLevel: info
+    LogFile: logs/debug.log
+    Services:
+        - '*'
+    Timestamp: true
+    CallerInfo: true
+ZLM:
+    UseEmbedded: true
+    AutoRestart: true
+    MaxRestarts: 5
+    API:
+        Debug: false
+        Secret: lJVRv67NnTsUMdq7nwybzCUBTcsyyR7x
+        SnapRoot: ./www/snap/
+        DefaultSnap: ./www/logo.png
+    FFmpeg:
+        Bin: /usr/bin/ffmpeg
+        Log: ./ffmpeg/ffmpeg.log
+        RestartSec: 0
+    Protocol:
+        ModifyStamp: 2
+        EnableAudio: true
+        AddMuteAudio: true
+        AutoClose: false
+        ContinuePushMS: 300000
+        EnableHLS: true
+        EnableHLSFmp4: false
+        EnableMP4: false
+        EnableRTSP: true
+        EnableRTMP: true
+        EnableTS: true
+        EnableFMP4: true
+        HLSDemand: false
+        RTSPDemand: false
+        RTMPDemand: false
+        TSDemand: false
+        FMP4Demand: false
+    General:
+        EnableVhost: false
+        FlowThreshold: 1024
+        MaxStreamWaitMS: 15000
+        StreamNoneReaderDelayMS: 0
+        MergeWriteMS: 0
+        MediaServerId: zpip-server
+        ListenIP: '0.0.0.0'
+    HLS:
+        FileBufSize: 65536
+        SegDur: 2
+        SegNum: 3
+        SegDelay: 0
+        SegRetain: 5
+        DeleteDelaySec: 10
+        SegKeep: false
+    Hook:
+        Enable: false
+        TimeoutSec: 10
+        AliveInterval: 10
+        Retry: 1
+        RetryDelay: 3
+        OnFlowReport: ""
+        OnHttpAccess: ""
+        OnPlay: ""
+        OnPublish: ""
+        OnRecordMP4: ""
+        OnRecordTS: ""
+        OnStreamChanged: ""
+        OnStreamNoneReader: ""
+        OnStreamNotFound: ""
+        OnServerStarted: ""
+        OnServerExited: ""
+        OnServerKeepalive: ""
+        OnSendRTPStopped: ""
+        OnRTPServerTimeout: ""
+        StreamChangedSchemas: rtsp/rtmp/fmp4/ts/hls/hls.fmp4
+    HTTP:
+        Port: 8081
+        SSLPort: 8443
+        CharSet: utf-8
+        KeepAliveSecond: 30
+        MaxReqSize: 40960
+        RootPath: ./www
+        SendBufSize: 65536
+        DirMenu: true
+        AllowCrossDomains: true
+        AllowIPRange: ::1,127.0.0.1,172.16.0.0-172.31.255.255,192.168.0.0-192.168.255.255,10.0.0.0-10.255.255.255
+    RTMP:
+        Port: 1935
+        SSLPort: 0
+        HandshakeSecond: 15
+        KeepAliveSecond: 15
+        DirectProxy: true
+        Enhanced: true
+    RTSP:
+        Port: 8554
+        SSLPort: 0
+        AuthBasic: false
+        DirectProxy: true
+        HandshakeSecond: 15
+        KeepAliveSecond: 15
+        LowLatency: false
+        RTPTransportType: -1
+    RTP:
+        AudioMtuSize: 600
+        VideoMtuSize: 1400
+        RTPMaxSize: 10
+        LowLatency: false
+        H264StapA: true
+    RTPProxy:
+        Port: 10000
+        TimeoutSec: 15
+        PortRange: 30000-35000
+        H264PT: 98
+        H265PT: 99
+        PSPT: 96
+        OpusPT: 100
+        GOPCache: 1
+        RTPG711DurMS: 100
+        UDPRecvSocketBuffer: 4194304
+        MergeFrame: true
+    Record:
+        AppName: record
+        RecordPath: ./recordings
+        FileBufSize: 65536
+        SampleMS: 500
+        FastStart: false
+        FileRepeat: false
+        EnableFmp4: false
+        FileSecond: 600
+        FileSizeMB: 0
+        EnableVideoCodec: false
+        VideoCodec: h264
+        VideoBitrate: 2000
+    RTC:
+        Port: 8000
+        TCPPort: 8000
+        TimeoutSec: 15
+        ExternIP: ""
+        Interfaces: ""
+        RembBitRate: 0
+        PreferredCodecA: PCMA,PCMU,opus,mpeg4-generic
+        PreferredCodecV: H264,H265,AV1,VP9,VP8
+        MaxRtpCacheMS: 5000
+        MaxRtpCacheSize: 2048
+        NackMaxSize: 2048
+        NackMaxMS: 3000
+        NackMaxCount: 15
+        NackIntervalRatio: 1
+        NackRtpSize: 8
+        BFilter: false
+    SRT:
+        Port: 9000
+        TimeoutSec: 5
+        LatencyMul: 4
+        PktBufSize: 8192
+        PassPhrase: ""
+    Shell:
+        Port: 0
+        MaxReqSize: 1024
+AI:
+    Enable: true
+    APIEndpoint: http://localhost:8001/detect
+    ModelPath: ./models/yolov8s.onnx
+    Confidence: 0.5
+    DetectInterval: 2
+    RecordDelay: 10
+    MinRecordTime: 5

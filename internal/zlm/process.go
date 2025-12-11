@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -549,4 +550,19 @@ func GetSystemInfo() map[string]string {
 		"numCPU": fmt.Sprintf("%d", runtime.NumCPU()),
 		"goRoot": runtime.GOROOT(),
 	}
+}
+
+// Add a method to handle graceful shutdown
+func (pm *ProcessManager) HandleSignals() {
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-signalChan
+		log.Println("[ZLM] 收到终止信号，正在停止 ZLM...")
+		if err := pm.Stop(); err != nil {
+			log.Printf("[ZLM] 停止 ZLM 时出错: %v", err)
+		}
+		os.Exit(0) // Ensure the main process exits
+	}()
 }

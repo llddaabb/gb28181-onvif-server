@@ -38,11 +38,11 @@ const (
 type RecycleMode string
 
 const (
-	RecycleModeNone     RecycleMode = "none"      // 不循环
-	RecycleModeOldest   RecycleMode = "oldest"    // 删除最老的文件
-	RecycleModeByTime   RecycleMode = "by_time"   // 按时间删除（保留N天）
-	RecycleModeBySize   RecycleMode = "by_size"   // 按大小删除（保留N GB）
-	RecycleModeByCount  RecycleMode = "by_count"  // 按数量删除（保留N个文件）
+	RecycleModeNone    RecycleMode = "none"     // 不循环
+	RecycleModeOldest  RecycleMode = "oldest"   // 删除最老的文件
+	RecycleModeByTime  RecycleMode = "by_time"  // 按时间删除（保留N天）
+	RecycleModeBySize  RecycleMode = "by_size"  // 按大小删除（保留N GB）
+	RecycleModeByCount RecycleMode = "by_count" // 按数量删除（保留N个文件）
 )
 
 // Disk 磁盘信息
@@ -76,13 +76,13 @@ type DiskGroup struct {
 
 // RecyclePolicy 循环录制策略
 type RecyclePolicy struct {
-	Enabled      bool        `json:"enabled"`      // 是否启用
-	Mode         RecycleMode `json:"mode"`         // 循环模式
-	KeepDays     int         `json:"keepDays"`     // 保留天数 (用于by_time模式)
-	KeepSizeGB   int         `json:"keepSizeGB"`   // 保留容量GB (用于by_size模式)
-	KeepCount    int         `json:"keepCount"`    // 保留文件数 (用于by_count模式)
-	MinFreeSpacePercent int  `json:"minFreeSpacePercent"` // 最小剩余空间百分比(触发回收)
-	CheckInterval time.Duration `json:"checkInterval"` // 检查间隔
+	Enabled             bool          `json:"enabled"`             // 是否启用
+	Mode                RecycleMode   `json:"mode"`                // 循环模式
+	KeepDays            int           `json:"keepDays"`            // 保留天数 (用于by_time模式)
+	KeepSizeGB          int           `json:"keepSizeGB"`          // 保留容量GB (用于by_size模式)
+	KeepCount           int           `json:"keepCount"`           // 保留文件数 (用于by_count模式)
+	MinFreeSpacePercent int           `json:"minFreeSpacePercent"` // 最小剩余空间百分比(触发回收)
+	CheckInterval       time.Duration `json:"checkInterval"`       // 检查间隔
 }
 
 // DiskManager 磁盘管理器
@@ -183,7 +183,7 @@ func (dm *DiskManager) monitorLoop() {
 			debug.Info("storage", "执行定期检查...")
 			// 更新磁盘状态
 			dm.updateDiskStatus()
-			
+
 			// 执行循环录制检查
 			if dm.recyclePolicy.Enabled {
 				debug.Info("storage", "循环录制已启用，模式: %s", dm.recyclePolicy.Mode)
@@ -331,7 +331,7 @@ func (dm *DiskManager) deleteOldestFiles(disk *Disk) {
 		debug.Info("storage", "已删除旧录像: %s (%.2f MB)", file.Info.Name(), float64(fileSize)/(1024*1024))
 	}
 
-	debug.Info("storage", "循环录制完成，删除 %d 个文件，释放 %.2f GB", 
+	debug.Info("storage", "循环录制完成，删除 %d 个文件，释放 %.2f GB",
 		deletedCount, float64(deletedSize)/(1024*1024*1024))
 }
 
@@ -378,8 +378,8 @@ func (dm *DiskManager) deleteFilesByCount(disk *Disk, keepCount int) {
 // findRecordingFiles 查找录像文件
 // RecordingFile 录像文件信息
 type RecordingFile struct {
-	Path    string      // 完整路径
-	Info    os.FileInfo // 文件信息
+	Path string      // 完整路径
+	Info os.FileInfo // 文件信息
 }
 
 // findRecordingFiles 查找所有录像文件
@@ -506,9 +506,9 @@ func (dm *DiskManager) loadConfig() error {
 	}
 
 	var config struct {
-		Disks         map[string]*Disk       `json:"disks"`
-		DiskGroups    map[string]*DiskGroup  `json:"diskGroups"`
-		RecyclePolicy *RecyclePolicy         `json:"recyclePolicy"`
+		Disks         map[string]*Disk      `json:"disks"`
+		DiskGroups    map[string]*DiskGroup `json:"diskGroups"`
+		RecyclePolicy *RecyclePolicy        `json:"recyclePolicy"`
 	}
 
 	if err := json.Unmarshal(data, &config); err != nil {
@@ -570,11 +570,11 @@ func (dm *DiskManager) GetDiskStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"totalDisks":   len(dm.disks),
-		"onlineDisks":  onlineCount,
-		"totalSize":    totalSize,
-		"usedSize":     usedSize,
-		"freeSize":     freeSize,
-		"usedPercent":  float64(usedSize) / float64(totalSize) * 100,
+		"totalDisks":  len(dm.disks),
+		"onlineDisks": onlineCount,
+		"totalSize":   totalSize,
+		"usedSize":    usedSize,
+		"freeSize":    freeSize,
+		"usedPercent": float64(usedSize) / float64(totalSize) * 100,
 	}
 }

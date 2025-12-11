@@ -190,6 +190,19 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 		return
 	}
 
+	// 如果是响应，进行响应处理
+	if message.IsResponse {
+		log.Printf("[SIP-UDP] 收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, remoteAddr)
+		// 对于响应，我们需要向设备发送 ACK（如果是 INVITE 的2xx响应）
+		// 使用UDP连接发送 ACK
+		remoteUDP := &net.UDPAddr{
+			IP:   remoteAddr.IP,
+			Port: remoteAddr.Port,
+		}
+		s.sendACKUDP(remoteUDP, message)
+		return
+	}
+
 	// 根据消息类型进行处理
 	log.Printf("[SIP-UDP] 收到消息类型: %s 来自: %s", message.Type, remoteAddr)
 	debug.Info("gb28181", "UDP SIP消息: 类型=%s, 来自=%s", message.Type, remoteAddr)

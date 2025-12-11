@@ -303,7 +303,7 @@
       v-model="previewData.showDialog" 
       :title="previewDialogTitle"
       width="950px"
-      @close="stopPreview"
+      @close="() => { if (previewPlayerRef.value) previewPlayerRef.value.stopPreview() }"
       @open="onPreviewDialogOpen">
       <div class="preview-container">
         <!-- 通道选择器 -->
@@ -332,53 +332,28 @@
               </div>
             </el-option>
           </el-select>
-          <el-button 
+            <el-button 
             type="primary" 
             size="small" 
             style="margin-left: 10px;" 
-            @click="startPreviewStream"
+            @click="() => { if (previewPlayerRef.value) previewPlayerRef.value.startPreview(previewData.selectedChannelId) }"
             :loading="previewData.loading"
             :disabled="!previewData.selectedChannelId">
             开始预览
           </el-button>
         </div>
         
-        <!-- 视频播放区域 -->
-        <div class="video-player-wrapper" v-loading="previewData.loading">
-          <video 
-            ref="videoRef" 
-            class="video-player"
-            controls
-            autoplay
-            muted
-            @error="onVideoError">
-          </video>
-          <div v-if="previewData.error" class="video-error">
-            <el-icon size="48"><VideoCamera /></el-icon>
-            <p>{{ previewData.error }}</p>
-            <el-button type="primary" @click="retryPreview">重试</el-button>
-          </div>
-        </div>
-
-        <!-- 播放信息 -->
-        <div class="stream-urls" v-if="previewData.streamInfo">
-          <el-descriptions :column="1" border size="small">
-            <el-descriptions-item label="HTTP-FLV">
-              <el-link type="primary" @click="copyToClipboard(previewData.streamInfo.flv_url)">
-                {{ previewData.streamInfo.flv_url }}
-              </el-link>
-            </el-descriptions-item>
-            <el-descriptions-item label="WS-FLV">
-              <el-link type="primary" @click="copyToClipboard(previewData.streamInfo.ws_flv_url)">
-                {{ previewData.streamInfo.ws_flv_url }}
-              </el-link>
-            </el-descriptions-item>
-            <el-descriptions-item label="HLS">
-              <el-link type="primary" @click="copyToClipboard(previewData.streamInfo.hls_url)">
-                {{ previewData.streamInfo.hls_url }}
-              </el-link>
-            </el-descriptions-item>
-          </el-descriptions>
+        <!-- 视频播放区域：使用复用 PreviewPlayer 组件 -->
+        <div class="video-player-wrapper">
+          <PreviewPlayer
+            ref="previewPlayerRef"
+            :show="previewData.showDialog"
+            :device="previewData.device"
+            :channels="previewData.channels"
+            :selectedChannelId="previewData.selectedChannelId"
+            @update:selectedChannelId="(v) => previewData.selectedChannelId = v"
+            @update:show="(v) => previewData.showDialog = v"
+          />
         </div>
 
         <el-alert
@@ -390,8 +365,8 @@
           style="margin-top: 16px;"></el-alert>
       </div>
 
-      <template #footer>
-        <el-button type="danger" @click="stopPreviewAndClose">停止预览</el-button>
+        <template #footer>
+        <el-button type="danger" @click="() => { if (previewPlayerRef.value) previewPlayerRef.value.stopPreview(); previewData.showDialog = false }">停止预览</el-button>
       </template>
     </el-dialog>
 
@@ -586,9 +561,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { VideoCamera } from '@element-plus/icons-vue'
+import PreviewPlayer from '../components/PreviewPlayer.vue'
 
 interface Device {
   deviceId: string
@@ -705,16 +681,14 @@ const filteredDevices = computed(() => {
   })
 })
 
-// 预览数据
+// 预览数据（仅保存 UI 状态，播放器逻辑在 PreviewPlayer 组件内）
 const previewData = reactive({
   showDialog: false,
   device: null as Device | null,
   channels: [] as Channel[],
   selectedChannelId: '' as string,
   loading: false,
-  error: '',
-  streamInfo: null as StreamInfo | null,
-  flvPlayer: null as any
+  error: ''
 })
 
 // 预览对话框标题
@@ -742,11 +716,13 @@ const channelsData = reactive({
   loading: false
 })
 
-// 视频播放器引用
-const videoRef = ref<HTMLVideoElement | null>(null)
+// 使用 PreviewPlayer 组件，不再直接引用 video 元素
 
 // 自动刷新定时器
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+
+// PreviewPlayer ref
+const previewPlayerRef = ref<any>(null)
 
 // 获取设备列表
 const refreshDevices = async () => {
@@ -814,7 +790,7 @@ const showPreview = async (device: Device) => {
   previewData.channels = []
   previewData.selectedChannelId = ''
   previewData.error = ''
-  previewData.streamInfo = null
+  // streamInfo moved into PreviewPlayer component
   previewData.showDialog = true
 }
 
@@ -832,7 +808,7 @@ const onPreviewDialogOpen = async () => {
       // 如果只有一个通道，自动选中并开始预览
       if (previewData.channels.length === 1) {
         previewData.selectedChannelId = previewData.channels[0].channelId
-        startPreviewStream()
+        if (previewPlayerRef.value) previewPlayerRef.value.startPreview(previewData.selectedChannelId)
       } else if (previewData.channels.length > 1) {
         // 多个通道，选中第一个在线的通道
         const onlineChannel = previewData.channels.find(c => c.status === 'ON' || c.status === 'online')
@@ -851,156 +827,7 @@ const onPreviewDialogOpen = async () => {
   }
 }
 
-// 通道切换
-const onChannelChange = () => {
-  // 停止当前播放
-  if (previewData.flvPlayer) {
-    try {
-      previewData.flvPlayer.pause()
-      previewData.flvPlayer.unload()
-      previewData.flvPlayer.detachMediaElement()
-      previewData.flvPlayer.destroy()
-    } catch (e) {
-      console.warn('清理播放器时出错:', e)
-    }
-    previewData.flvPlayer = null
-  }
-  previewData.streamInfo = null
-  previewData.error = ''
-}
-
-// 启动预览流
-const startPreviewStream = async () => {
-  if (!previewData.device) return
-  
-  const channelId = previewData.selectedChannelId || previewData.device.deviceId
-  
-  previewData.loading = true
-  previewData.error = ''
-  
-  try {
-    const response = await fetch(`/api/gb28181/devices/${previewData.device.deviceId}/channels/${channelId}/preview/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}))
-      throw new Error(errData.error || '启动预览失败')
-    }
-    
-    const data = await response.json()
-    if (!data.success) {
-      throw new Error(data.error || '启动预览失败')
-    }
-    
-    previewData.streamInfo = data.data
-    
-    // 等待 DOM 更新后初始化播放器
-    await nextTick()
-    initFlvPlayer()
-    
-  } catch (error: any) {
-    console.error('启动预览失败:', error)
-    previewData.error = error.message || '启动预览失败'
-  } finally {
-    previewData.loading = false
-  }
-}
-
-// 初始化 FLV 播放器
-const initFlvPlayer = async () => {
-  if (!previewData.streamInfo || !videoRef.value) return
-  
-  try {
-    const flvjs = await import('flv.js')
-    
-    if (!flvjs.default.isSupported()) {
-      previewData.error = '浏览器不支持 FLV 播放'
-      return
-    }
-    
-    if (previewData.flvPlayer) {
-      previewData.flvPlayer.destroy()
-      previewData.flvPlayer = null
-    }
-    
-    previewData.flvPlayer = flvjs.default.createPlayer({
-      type: 'flv',
-      url: previewData.streamInfo.flv_url,
-      isLive: true,
-      hasAudio: true,
-      hasVideo: true,
-      cors: true
-    }, {
-      enableStashBuffer: false,
-      stashInitialSize: 128,
-      enableWorker: true,
-      lazyLoadMaxDuration: 3 * 60,
-      seekType: 'range'
-    })
-    
-    previewData.flvPlayer.attachMediaElement(videoRef.value)
-    previewData.flvPlayer.load()
-    previewData.flvPlayer.play()
-    
-    previewData.flvPlayer.on(flvjs.default.Events.ERROR, (errType: any, errDetail: any) => {
-      console.error('FLV播放器错误:', errType, errDetail)
-      previewData.error = `播放错误: ${errDetail}`
-    })
-    
-  } catch (error: any) {
-    console.error('初始化播放器失败:', error)
-    previewData.error = `播放器初始化失败: ${error.message}`
-  }
-}
-
-// 停止预览
-const stopPreview = async () => {
-  if (previewData.flvPlayer) {
-    try {
-      previewData.flvPlayer.pause()
-      previewData.flvPlayer.unload()
-      previewData.flvPlayer.detachMediaElement()
-      previewData.flvPlayer.destroy()
-    } catch (e) {
-      console.warn('销毁播放器时出错:', e)
-    }
-    previewData.flvPlayer = null
-  }
-  
-  if (previewData.device && previewData.streamInfo) {
-    const channelId = previewData.selectedChannelId || previewData.device.deviceId
-    try {
-      await fetch(`/api/gb28181/devices/${previewData.device.deviceId}/channels/${channelId}/preview/stop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      })
-    } catch (e) {
-      console.warn('停止预览流时出错:', e)
-    }
-  }
-  
-  previewData.streamInfo = null
-  previewData.error = ''
-}
-
-const stopPreviewAndClose = async () => {
-  await stopPreview()
-  previewData.showDialog = false
-}
-
-const retryPreview = () => {
-  previewData.error = ''
-  startPreviewStream()
-}
-
-const onVideoError = (event: Event) => {
-  console.error('视频播放错误:', event)
-  if (!previewData.error) {
-    previewData.error = '视频加载失败，请检查设备是否正在推流'
-  }
-}
+// 预览逻辑已迁移到 `PreviewPlayer` 组件，页面只负责控制对话框和通道列表
 
 // PTZ 控制
 const showPTZControl = (device: Device) => {
@@ -1101,11 +928,11 @@ const previewChannel = (channel: Channel) => {
     previewData.channels = channelsData.channels
     previewData.selectedChannelId = channel.channelId
     previewData.error = ''
-    previewData.streamInfo = null
+    // streamInfo handled by PreviewPlayer
     previewData.showDialog = true
     channelsData.showDialog = false
     // 直接开始预览
-    startPreviewStream()
+    if (previewPlayerRef.value) previewPlayerRef.value.startPreview(previewData.selectedChannelId)
   }
 }
 
@@ -1234,7 +1061,9 @@ onUnmounted(() => {
   if (refreshTimer) {
     clearInterval(refreshTimer)
   }
-  stopPreview()
+  if (previewPlayerRef && previewPlayerRef.value) {
+    try { previewPlayerRef.value.stopPreview() } catch (e) { console.warn('stop preview on unmount', e) }
+  }
 })
 </script>
 

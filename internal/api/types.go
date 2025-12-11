@@ -9,6 +9,7 @@ type Channel struct {
 	DeviceID     string `json:"deviceId"`
 	DeviceType   string `json:"deviceType"` // "gb28181" or "onvif"
 	Status       string `json:"status"`     // "online" or "offline"
+	SipPort      int    `json:"sipPort,omitempty"`
 	StreamURL    string `json:"streamUrl"`
 	Channel      string `json:"channel,omitempty"`      // GB28181通道号
 	ProfileToken string `json:"profileToken,omitempty"` // ONVIF Profile Token
@@ -32,13 +33,13 @@ type Recording struct {
 
 // StreamInfo 流信息
 type StreamInfo struct {
-	StreamID    string    `json:"streamId"`
-	ChannelID   string    `json:"channelId"`
-	DeviceID    string    `json:"deviceId"`
-	StreamURL   string    `json:"streamUrl"`
-	StreamType  string    `json:"streamType"`
-	Status      string    `json:"status"`
-	StartTime   time.Time `json:"startTime"`
-	EndTime     time.Time `json:"endTime,omitempty"`
-	Duration    string    `json:"duration,omitempty"`
+	StreamID   string    `json:"streamId"`
+	ChannelID  string    `json:"channelId"`
+	DeviceID   string    `json:"deviceId"`
+	StreamURL  string    `json:"streamUrl"`
+	StreamType string    `json:"streamType"`
+	Status     string    `json:"status"`
+	StartTime  time.Time `json:"startTime"`
+	EndTime    time.Time `json:"endTime,omitempty"`
+	Duration   string    `json:"duration,omitempty"`
 }

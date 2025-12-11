@@ -120,12 +120,13 @@
           >
             <!-- 视频播放器 -->
             <div class="video-wrapper" v-if="slot.streamKey">
-              <video 
-                :ref="el => setVideoRef(el, index)"
-                class="video-player" 
-                autoplay 
-                muted
-              ></video>
+              <PreviewPlayer
+                :ref="el => setPlayerRef(index, el)"
+                :show="true"
+                :device="null"
+                :channels="[]"
+                :selectedChannelId="''"
+              />
               <div class="video-overlay">
                 <div class="stream-info">
                   <span class="stream-name">{{ slot.streamName || slot.streamKey }}</span>
@@ -208,11 +209,14 @@ import {
   WarningFilled,
   VideoCamera
 } from '@element-plus/icons-vue'
+import PreviewPlayer from '../components/PreviewPlayer.vue'
 
 interface PreviewSlot {
   streamKey: string
   streamName: string
   streamUrl: string
+  flvUrl?: string
+  hlsUrl?: string
   streamType: 'gb28181' | 'onvif' | 'custom'
   loading: boolean
   error: string
@@ -253,8 +257,30 @@ const rows = ref(2)
 // 槽位数据
 const slots = ref<PreviewSlot[]>([])
 const selectedSlot = ref<number | null>(null)
-const videoRefs = ref<Record<number, HTMLVideoElement | null>>({})
-const flvPlayers = ref<Record<number, any>>({})
+// per-slot PreviewPlayer refs
+const playerRefs = ref<Record<number, any>>({})
+
+const setPlayerRef = (index: number, el: any) => {
+  if (!el) {
+    delete playerRefs.value[index]
+  } else {
+    playerRefs.value[index] = el
+  }
+}
+
+// Resolve the actual component instance from various possible ref shapes
+const resolvePlayer = (el: any) => {
+  if (!el) return null
+  // already a component public instance
+  if (typeof el.startWithStreamInfo === 'function') return el
+  // maybe a ref object
+  if (el.value && typeof el.value.startWithStreamInfo === 'function') return el.value
+  // try internal exposed (Vue internals) - best-effort
+  // @ts-ignore
+  if (el.$ && el.$.exposed && typeof el.$.exposed.startWithStreamInfo === 'function') return el.$.exposed
+  // no usable API found
+  return null
+}
 
 // 通道树
 const treeRef = ref<InstanceType<typeof ElTree>>()
@@ -502,19 +528,18 @@ const addStreamToNextSlot = async (data: TreeNode) => {
     
     if (!streamReady) {
       try {
-        const response = await fetch(`/api/gb28181/devices/${deviceId}/channels/${channelId}/preview/test`, {
+        const response = await fetch(`/api/gb28181/devices/${deviceId}/channels/${channelId}/preview/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' }
         })
         const result = await response.json()
         if (result.success && result.data) {
-          const originalUrl = result.data.flv_url || liveStreamUrl
-          slot.streamUrl = originalUrl.replace('127.0.0.1', host).replace('localhost', host)
+          slot.flvUrl = result.data.flv_url ? result.data.flv_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
+          slot.hlsUrl = result.data.hls_url ? result.data.hls_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
+          slot.streamUrl = slot.hlsUrl || slot.flvUrl || liveStreamUrl
           streamReady = true
-          console.log('API 返回的 URL:', originalUrl, '替换后:', slot.streamUrl)
-          if (!result.exists) {
-            await new Promise(resolve => setTimeout(resolve, 1000))
-          }
+          console.log('API 返回的 URLs:', { flv: slot.flvUrl, hls: slot.hlsUrl }, '选用:', slot.streamUrl)
+          await new Promise(resolve => setTimeout(resolve, 1000))
         } else if (result.error && result.error.includes('already exists')) {
           slot.streamUrl = liveStreamUrl
           streamReady = true
@@ -532,7 +557,9 @@ const addStreamToNextSlot = async (data: TreeNode) => {
         })
         const startResult = await startResponse.json()
         if (startResult.success && startResult.data) {
-          slot.streamUrl = startResult.data.flv_url?.replace('127.0.0.1', host) || rtpStreamUrl
+          slot.flvUrl = startResult.data.flv_url ? startResult.data.flv_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
+          slot.hlsUrl = startResult.data.hls_url ? startResult.data.hls_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
+          slot.streamUrl = slot.hlsUrl || slot.flvUrl || rtpStreamUrl
           streamReady = true
           await new Promise(resolve => setTimeout(resolve, 1500))
         }
@@ -542,6 +569,7 @@ const addStreamToNextSlot = async (data: TreeNode) => {
     }
 
     if (!streamReady) {
+      slot.flvUrl = liveStreamUrl
       slot.streamUrl = liveStreamUrl
     }
   } else if (data.type === 'onvif' && data.data) {
@@ -570,9 +598,9 @@ const initSlots = (count: number, keepStreams = false) => {
   // 保存当前流数据
   const existingStreams = keepStreams ? slots.value.filter(s => s.streamKey) : []
   
-  // 停止所有现有播放器
-  Object.keys(flvPlayers.value).forEach(key => {
-    stopStream(parseInt(key))
+  // 停止所有现有播放器（只停止本地播放，保留后端流以便快速恢复）
+  Object.keys(playerRefs.value).forEach(key => {
+    try { playerRefs.value[Number(key)]?.stopPlaybackOnly() } catch (e) {}
   })
   
   // 创建新槽位
@@ -641,12 +669,7 @@ const applyCustomLayout = () => {
   initSlots(customCols.value * customRows.value, true) // 保留现有流
 }
 
-// 设置视频引用
-const setVideoRef = (el: any, index: number) => {
-  if (el) {
-    videoRefs.value[index] = el as HTMLVideoElement
-  }
-}
+// playerRefs are set via template ref bindings
 
 // 选择槽位
 const selectSlot = (index: number) => {
@@ -656,143 +679,43 @@ const selectSlot = (index: number) => {
 // 播放流
 const playStream = async (index: number) => {
   const slot = slots.value[index]
-  if (!slot.streamUrl) return
-  
+  if (!slot.streamUrl && !slot.flvUrl && !slot.hlsUrl) return
+
   slot.loading = true
   slot.error = ''
-  
-  // 停止现有播放器
-  stopStream(index)
-  
+
+  // stop existing player
+  try { const p = resolvePlayer(playerRefs.value[index]); if (p) await p.stopPreview(); } catch (e) {}
+
   try {
-    // 等待视频元素准备就绪
-    let videoEl = videoRefs.value[index]
-    let retries = 0
-    while (!videoEl && retries < 10) {
-      await new Promise(resolve => setTimeout(resolve, 100))
-      videoEl = videoRefs.value[index]
-      retries++
-    }
-    
-    if (!videoEl) {
-      console.error('视频元素未找到, index:', index)
-      slot.error = '视频元素未准备就绪'
+    const info: any = { flv_url: slot.flvUrl || slot.streamUrl, hls_url: slot.hlsUrl || slot.streamUrl }
+    await nextTick()
+    const player = resolvePlayer(playerRefs.value[index])
+    if (!player) {
+      slot.error = '播放器未就绪'
       slot.loading = false
       return
     }
-    
-    console.log('开始播放流:', slot.streamUrl)
-    
-    // 使用 flv.js
-    if (slot.streamUrl.includes('.flv')) {
-      // 动态导入 flv.js（必须与其他组件保持一致的导入方式）
-      const flvjs = await import('flv.js')
-      
-      if (flvjs.default && flvjs.default.isSupported && flvjs.default.isSupported()) {
-        console.log('flv.js 支持，创建播放器, URL:', slot.streamUrl)
-        const player = flvjs.default.createPlayer({
-          type: 'flv',
-          url: slot.streamUrl,
-          isLive: true
-        }, {
-          enableWorker: false,
-          enableStashBuffer: false,
-          stashInitialSize: 128,
-          lazyLoad: false,
-          lazyLoadMaxDuration: 0,
-          deferLoadAfterSourceOpen: false
-        })
-        
-        player.attachMediaElement(videoEl)
-        player.load()
-        
-        // 添加错误事件处理
-        player.on(flvjs.default.Events.ERROR, (errorType: any, errorDetail: any, errorInfo: any) => {
-          console.error('FLV 播放错误:', errorType, errorDetail, errorInfo)
-          slot.error = `播放失败: ${errorDetail || errorType}`
-          slot.loading = false
-        })
-        
-        player.on(flvjs.default.Events.LOADING_COMPLETE, () => {
-          console.log('FLV 加载完成')
-        })
-        
-        player.on(flvjs.default.Events.METADATA_ARRIVED, () => {
-          console.log('FLV 元数据到达')
-          slot.loading = false
-        })
-        
-        // 尝试播放
-        try {
-          await player.play()
-          console.log('播放已开始')
-        } catch (e) {
-          console.error('播放失败:', e)
-          // 静音重试
-          videoEl.muted = true
-          try {
-            await player.play()
-          } catch (e2) {
-            console.error('静音播放也失败:', e2)
-          }
-        }
-        
-        flvPlayers.value[index] = player
-        slot.player = player
-        
-        // 超时处理
-        setTimeout(() => {
-          if (slot.loading) {
-            slot.loading = false
-          }
-        }, 5000)
-      } else {
-        console.error('flv.js 不支持当前浏览器')
-        slot.error = '浏览器不支持 FLV 播放'
-        slot.loading = false
-      }
-    } else if (slot.streamUrl.includes('.m3u8')) {
-      videoEl.src = slot.streamUrl
-      videoEl.play()
-      slot.loading = false
-    } else {
-      videoEl.src = slot.streamUrl
-      videoEl.play()
-      slot.loading = false
-    }
-  } catch (error) {
-    slot.error = '播放失败'
+    await player.startWithStreamInfo(info)
+    slot.loading = false
+  } catch (e: any) {
+    console.error('播放失败:', e)
+    slot.error = e.message || '播放失败'
     slot.loading = false
   }
 }
 
 // 停止单个流
 const stopStream = (index: number) => {
-  const player = flvPlayers.value[index]
-  if (player) {
-    try {
-      player.pause()
-      player.unload()
-      player.detachMediaElement()
-      player.destroy()
-    } catch (e) {}
-    delete flvPlayers.value[index]
-  }
-  
-  const videoEl = videoRefs.value[index]
-  if (videoEl) {
-    videoEl.pause()
-    videoEl.src = ''
-  }
-  
-  if (slots.value[index]) {
-    slots.value[index].player = null
-  }
+  try { const p = resolvePlayer(playerRefs.value[index]); if (p) p.stopPlaybackOnly() } catch (e) {}
+  if (slots.value[index]) slots.value[index].player = null
 }
 
 // 移除流
 const removeStream = (index: number) => {
-  stopStream(index)
+  // 停止本地播放并请求后端停止预览（清理ZLM端口）
+  try { const p = resolvePlayer(playerRefs.value[index]); if (p) p.stopPlaybackOnly() } catch (e) {}
+  try { const p2 = resolvePlayer(playerRefs.value[index]); if (p2) p2.stopPreview() } catch (e) {}
   slots.value[index] = {
     streamKey: '',
     streamName: '',
@@ -815,8 +738,10 @@ const refreshAllStreams = () => {
 
 // 清空所有流
 const clearAllStreams = () => {
-  Object.keys(flvPlayers.value).forEach(key => {
-    stopStream(parseInt(key))
+  Object.keys(playerRefs.value).forEach(key => {
+    // stop both local playback and backend preview
+    try { playerRefs.value[parseInt(key)]?.stopPlaybackOnly() } catch (e) {}
+    try { playerRefs.value[parseInt(key)]?.stopPreview() } catch (e) {}
   })
   
   slots.value = slots.value.map(() => ({
@@ -960,6 +885,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  // ensure backend previews are cleaned up
+  Object.keys(playerRefs.value).forEach(key => {
+    try { playerRefs.value[parseInt(key)]?.stopPreview() } catch (e) {}
+  })
   clearAllStreams()
   document.removeEventListener('fullscreenchange', handleFullscreenChange)
 })

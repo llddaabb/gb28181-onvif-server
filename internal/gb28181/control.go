@@ -73,7 +73,17 @@ func (s *Server) SendPTZCommand(deviceID, channel, ptzCmd string, speed int) err
 	// 设置消息体
 	msg.Body = string(xmlBytes)
 
-	// 发送消息
+	// 优先尝试使用 UDP（如果设备配置为 UDP 或本地 UDP 连接已初始化）
+	msgStr := buildSIPMessageString(msg)
+	if device.Transport == "UDP" || s.udpConn != nil {
+		if err := s.sendSIPMessageUDP(device, msgStr); err == nil {
+			return nil
+		} else {
+			log.Printf("[PTZ] [WARN] UDP 发送失败，回退到 TCP: %v", err)
+		}
+	}
+
+	// 发送消息（TCP）
 	return s.sendSIPMessage(device, msg)
 }
 

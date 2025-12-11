@@ -143,7 +143,11 @@
       <div class="preview-container">
         <!-- 视频播放器 -->
         <div class="video-player-wrapper">
-          <video ref="videoPlayer" class="video-player" controls autoplay muted></video>
+          <PreviewPlayer ref="previewPlayerRef" :show="true" :device="null" :channels="[]" :selectedChannelId="''"
+            @playing="() => { previewLoading = false }"
+            @error="(msg) => { previewLoading = false; ElMessage.error(msg || '播放失败') }"
+            @loading="(val) => { previewLoading = val }"
+          />
           <div v-if="previewLoading" class="video-loading">
             <el-icon class="is-loading"><Refresh /></el-icon>
             <span>正在加载...</span>
@@ -191,9 +195,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
+import PreviewPlayer from '../components/PreviewPlayer.vue'
 
 interface Stream {
   app?: string
@@ -252,10 +257,9 @@ const previewInfo = reactive({
   rtmp: ''
 })
 
-// 视频播放器
-const videoPlayer = ref<HTMLVideoElement | null>(null)
+// 播放器引用
+const previewPlayerRef = ref<any>(null)
 const previewLoading = ref(false)
-let flvPlayer: any = null
 
 // 定时刷新
 let refreshTimer: number | null = null
@@ -369,35 +373,38 @@ const previewStream = (row: Stream) => {
   previewInfo.rtmp = `rtmp://${host}:${rtmpPort}/${app}/${stream}`
   
   showPreviewDialog.value = true
-  
-  // 自动播放 FLV
-  setTimeout(() => playStream('flv'), 300)
+  // 打开对话框后使用 nextTick 启动播放并监听播放器事件
+  previewLoading.value = true
+  nextTick(() => {
+    try {
+      const candidate = previewPlayerRef.value
+      const p = (candidate && typeof candidate.startWithStreamInfo === 'function') ? candidate : (candidate && candidate.value && typeof candidate.value.startWithStreamInfo === 'function') ? candidate.value : (candidate && candidate.$ && candidate.$.exposed && typeof candidate.$.exposed.startWithStreamInfo === 'function') ? candidate.$.exposed : null
+      if (!p) {
+        previewLoading.value = false
+        return
+      }
+      // 启动播放
+      p.startWithStreamInfo({ flv_url: previewInfo.httpFlv, hls_url: previewInfo.hls })
+    } catch (e) { previewLoading.value = false }
+  })
 }
 
 // 播放流
 const playStream = async (type: 'flv' | 'hls') => {
-  stopPreview()
+  // 使用 PreviewPlayer 控制播放；优先 hls
   previewLoading.value = true
-  
   try {
-    if (type === 'flv' && videoPlayer.value) {
-      // 动态导入 flv.js
-      const flvjs = await import('flv.js')
-      if (flvjs.default.isSupported()) {
-        flvPlayer = flvjs.default.createPlayer({
-          type: 'flv',
-          url: previewInfo.httpFlv,
-          isLive: true
-        })
-        flvPlayer.attachMediaElement(videoPlayer.value)
-        flvPlayer.load()
-        flvPlayer.play()
-      } else {
-        ElMessage.warning('当前浏览器不支持 FLV 播放')
-      }
-    } else if (type === 'hls' && videoPlayer.value) {
-      videoPlayer.value.src = previewInfo.hls
-      videoPlayer.value.play()
+    const player = previewPlayerRef.value
+    if (!player) {
+      ElMessage.error('播放器未就绪')
+      return
+    }
+    if (type === 'hls') {
+      await player.startWithStreamInfo({ hls_url: previewInfo.hls })
+    } else if (type === 'flv') {
+      await player.startWithStreamInfo({ flv_url: previewInfo.httpFlv })
+    } else {
+      await player.startWithStreamInfo({ flv_url: previewInfo.httpFlv, hls_url: previewInfo.hls })
     }
   } catch (error) {
     console.error('播放失败:', error)
@@ -409,17 +416,8 @@ const playStream = async (type: 'flv' | 'hls') => {
 
 // 停止预览
 const stopPreview = () => {
-  if (flvPlayer) {
-    flvPlayer.pause()
-    flvPlayer.unload()
-    flvPlayer.detachMediaElement()
-    flvPlayer.destroy()
-    flvPlayer = null
-  }
-  if (videoPlayer.value) {
-    videoPlayer.value.pause()
-    videoPlayer.value.src = ''
-  }
+  try { previewPlayerRef.value?.stopPlaybackOnly() } catch (e) {}
+  try { previewPlayerRef.value?.stopPreview() } catch (e) {}
 }
 
 // 复制 URL

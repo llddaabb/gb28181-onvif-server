@@ -134,6 +134,32 @@ func (s *Server) InviteRequest(deviceID, channelID string, rtpPort int, mediaIP 
 		sessionManager.RemoveSession(deviceID, channelID)
 	}
 
+	// 确保 mediaIP 有效且设备可以访问
+	if mediaIP == "" || mediaIP == "0.0.0.0" || mediaIP == "::" || mediaIP == "localhost" {
+		// 使用设备地址所在的网络获取本机IP
+		mediaIP = device.SipIP
+		if mediaIP == "" || mediaIP == "0.0.0.0" || mediaIP == "::" {
+			mediaIP = "127.0.0.1"
+		}
+	}
+
+	// 尝试获取与设备在同一网段的本机IP（总是探测一次，避免选到不可达接口）
+	// 通过与设备通信的本地地址来获取IP
+	conn, err := net.Dial("udp", device.SipIP+":"+strconv.Itoa(device.SipPort))
+	if err == nil {
+		defer conn.Close()
+		localAddr := conn.LocalAddr().String()
+		if idx := strings.LastIndex(localAddr, ":"); idx > 0 {
+			candidateIP := localAddr[:idx]
+			// 检查是否是有效的IP且不是回环地址
+			if candidateIP != "" && candidateIP != "127.0.0.1" && candidateIP != "::1" {
+				mediaIP = candidateIP
+			}
+		}
+	}
+
+	log.Printf("[GB28181] INVITE 媒体IP最终决定: %s (设备IP: %s)", mediaIP, device.SipIP)
+
 	// 生成会话参数
 	callID := generateCallID()
 	fromTag := generateTag()
@@ -160,14 +186,14 @@ func (s *Server) InviteRequest(deviceID, channelID string, rtpPort int, mediaIP 
 	// 构建 SDP
 	sdp := s.buildInviteSDP(session, mediaIP)
 
-	// 构建 INVITE 消息
-	inviteMsg := s.buildInviteMessage(device, channelID, callID, fromTag, sdp)
+	// 构建 INVITE 消息，优先使用 mediaIP 作为本地 SIP 地址
+	inviteMsg := s.buildInviteMessage(device, channelID, callID, fromTag, sdp, mediaIP)
 
-	log.Printf("[GB28181] 发送 INVITE 请求: deviceID=%s, channelID=%s, rtpPort=%d, ssrc=%s",
-		deviceID, channelID, rtpPort, ssrc)
+	log.Printf("[GB28181] 发送 INVITE 请求: deviceID=%s, channelID=%s, rtpPort=%d, ssrc=%s, mediaIP=%s",
+		deviceID, channelID, rtpPort, ssrc, mediaIP)
 
 	// 发送 INVITE
-	err := s.sendSIPMessageUDP(device, inviteMsg)
+	err = s.sendSIPMessageUDP(device, inviteMsg)
 	if err != nil {
 		return nil, fmt.Errorf("发送 INVITE 失败: %v", err)
 	}
@@ -197,23 +223,29 @@ y=%s
 }
 
 // buildInviteMessage 构建 INVITE SIP 消息
-func (s *Server) buildInviteMessage(device *Device, channelID, callID, fromTag, sdp string) string {
+func (s *Server) buildInviteMessage(device *Device, channelID, callID, fromTag, sdp string, localIP string) string {
 	// 请求URI
 	requestURI := fmt.Sprintf("sip:%s@%s:%d", channelID, device.SipIP, device.SipPort)
 
 	// Via
+	// 如果提供了 localIP 且非空，则使用它作为本地地址，否则回退到配置
+	localAddrIP := s.config.SipIP
+	if localIP != "" && localIP != "0.0.0.0" && localIP != "::" {
+		localAddrIP = localIP
+	}
+
 	via := fmt.Sprintf("SIP/2.0/%s %s:%d;rport;branch=z9hG4bK%d",
-		device.Transport, s.config.SipIP, s.config.SipPort, time.Now().UnixNano())
+		device.Transport, localAddrIP, s.config.SipPort, time.Now().UnixNano())
 
 	// From
 	from := fmt.Sprintf("<sip:%s@%s:%d>;tag=%s",
-		s.config.ServerID, s.config.SipIP, s.config.SipPort, fromTag)
+		s.config.ServerID, localAddrIP, s.config.SipPort, fromTag)
 
 	// To
 	to := fmt.Sprintf("<sip:%s@%s:%d>", channelID, device.SipIP, device.SipPort)
 
 	// Contact
-	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.config.ServerID, s.config.SipIP, s.config.SipPort)
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.config.ServerID, localAddrIP, s.config.SipPort)
 
 	// 构建消息
 	msg := fmt.Sprintf("INVITE %s SIP/2.0\r\n", requestURI)
