@@ -256,28 +256,30 @@ const adjustPlayerSize = () => {
 function extractStreamUrl(data: any, schema: string) {
   if (!data) return '';
 
-  // WebSocket（ws-flv 最优）
-  if (schema === 'ws') {
-    return (
+  // 优先尝试HLS流
+  if (schema === 'hls' || schema === 'default') {
+    const hlsUrl = data.HlsURL || data.hlsUrl || '';
+    if (hlsUrl) return hlsUrl;
+  }
+
+  // WebSocket（ws-flv 次优）
+  if (schema === 'ws' || schema === 'default') {
+    const wsFlvUrl = (
       data.WsFlvURL ||
       data.WSFlvURL ||
       data.wsFlvUrl ||
       ''
     );
+    if (wsFlvUrl) return wsFlvUrl;
   }
 
-  // HLS 优先
-  if (schema === 'hls') {
-    return data.HlsURL || data.hlsUrl || '';
+  // 默认：FLV 作为最后选择
+  if (schema === 'default') {
+    const flvUrl = data.FlvURL || '';
+    if (flvUrl) return flvUrl;
   }
 
-  // 默认：FLV / WS-FLV 自动选择
-  return (
-    data.WsFlvURL ||
-    data.FlvURL ||
-    data.HlsURL ||
-    ''
-  );
+  return '';
 }
 
 /**
@@ -342,7 +344,8 @@ const flvUrl = rawUrl.startsWith('/') ? base + rawUrl : rawUrl;
       // autodestroy: false, // 默认或根据需要设置
       videoBuffer: 0.2, // 缓存时长，从案例中借鉴
       isResize: false,
-      useMSE: flvUrl ? true : false, // FLV 流通常使用 MSE
+      // 根据URL类型决定是否使用MSE
+      useMSE: finalUrl.includes('.flv') ? true : false,
       debug: false,
       // 隐藏自带的操作按钮
       operateBtns: {

@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -222,6 +225,33 @@ func (lw *loggingResponseWriter) WriteHeader(code int) {
 	lw.ResponseWriter.WriteHeader(code)
 }
 
+// Hijack proxies to the underlying ResponseWriter if it supports http.Hijacker.
+// This is required so reverse proxies can perform WebSocket upgrades when
+// middleware wraps the original ResponseWriter.
+func (lw *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := lw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not support Hijacker")
+	}
+	return hj.Hijack()
+}
+
+// Flush proxies to the underlying ResponseWriter if it supports http.Flusher.
+func (lw *loggingResponseWriter) Flush() {
+	if f, ok := lw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// ReadFrom proxies to the underlying ResponseWriter if it supports io.ReaderFrom.
+// This helps optimize copying large streaming responses.
+func (lw *loggingResponseWriter) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := lw.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return 0, fmt.Errorf("underlying ResponseWriter does not support ReadFrom")
+}
+
 // jsonResponse 发送 JSON 响应（保留用于向后兼容）
 func (s *Server) jsonResponse(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -341,6 +371,7 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	// ZLM媒体服务器API
 	zlmGroup := r.PathPrefix("/api/zlm").Subrouter()
 	zlmGroup.HandleFunc("/status", s.handleZLMStatus).Methods("GET")
+	zlmGroup.HandleFunc("/media-list", s.handleGetZLMMediaList).Methods("GET")
 	zlmGroup.HandleFunc("/process/status", s.handleZLMProcessStatus).Methods("GET")
 	zlmGroup.HandleFunc("/process/start", s.handleZLMProcessStart).Methods("POST")
 	zlmGroup.HandleFunc("/process/stop", s.handleZLMProcessStop).Methods("POST")
@@ -357,6 +388,7 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	r.PathPrefix("/zlm/").HandlerFunc(s.handleZLMProxy)
 
 	// 静态文件服务（必须在最后）
+
 	staticDir := "frontend/dist"
 	r.PathPrefix("/assets/").Handler(http.StripPrefix("/assets/", http.FileServer(http.Dir(staticDir+"/assets"))))
 	r.PathPrefix("/jessibuca/").Handler(http.StripPrefix("/jessibuca/", http.FileServer(http.Dir(staticDir+"/jessibuca"))))
@@ -490,8 +522,19 @@ func (s *Server) handleZLMProxy(w http.ResponseWriter, r *http.Request) {
 		zlmPort = 8081
 	}
 
-	// 构建 ZLM 目标 URL
-	targetURL := fmt.Sprintf("http://127.0.0.1:%d%s", zlmPort, r.URL.RequestURI())
+	// 构建 ZLM 目标 URL - 使用 r.URL.Path 并去掉 /zlm 前缀，保留起始斜杠
+	// 如果存在查询字符串，则附加 RawQuery
+	rawPath := strings.TrimPrefix(r.URL.Path, "/zlm")
+	if rawPath == "" {
+		rawPath = "/"
+	}
+	if !strings.HasPrefix(rawPath, "/") {
+		rawPath = "/" + rawPath
+	}
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d%s", zlmPort, rawPath)
+	if r.URL.RawQuery != "" {
+		targetURL = targetURL + "?" + r.URL.RawQuery
+	}
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		http.Error(w, "Invalid URL", http.StatusBadRequest)
@@ -501,16 +544,26 @@ func (s *Server) handleZLMProxy(w http.ResponseWriter, r *http.Request) {
 	// 创建反向代理
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// 自定义 Director
-	originalDirector := proxy.Director
+	// 设置 Director：将请求的 scheme/host/path/query 指向 ZLM 目标的对应字段。
+	// 使用精确赋值可避免因路径拼接导致的错误路由（例如重复前缀），
+	// 但仍保留原始请求的 header（例如 Origin、Authorization 等）。
 	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL = target
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.URL.Path = target.Path
+		req.URL.RawQuery = target.RawQuery
+		// 保持原始 Host 头为目标主机，方便 ZLM 根据 Host 处理请求
 		req.Host = target.Host
 	}
 
-	// 修改响应，添加 CORS 头
+	// 修改响应，添加 CORS 头（清除可能重复的头）
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		// 清除可能重复的 CORS 头
+		resp.Header.Del("Access-Control-Allow-Origin")
+		resp.Header.Del("Access-Control-Allow-Methods")
+		resp.Header.Del("Access-Control-Allow-Headers")
+		resp.Header.Del("Access-Control-Expose-Headers")
+		// 重新设置正确的 CORS 头
 		resp.Header.Set("Access-Control-Allow-Origin", "*")
 		resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		resp.Header.Set("Access-Control-Allow-Headers", "Content-Type, Range")

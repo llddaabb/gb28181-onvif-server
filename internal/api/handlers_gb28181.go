@@ -256,9 +256,12 @@ func (s *Server) handleStartGB28181Preview(w http.ResponseWriter, r *http.Reques
 
 	urls := s.buildStreamURLs(r, app, res.StreamID)
 
+	debug.Info("api", "GB28181预览已启动: device=%s, channel=%s, stream=%s, port=%d, ssrc=%s", deviceID, req.ChannelID, res.StreamID, res.RTPPort, res.SSRC)
+	debug.Info("api", "流地址: FLV=%s, HLS=%s", urls.FlvURL, urls.HlsURL)
+
 	respondRaw(w, http.StatusOK, map[string]interface{}{
 		"success": true,
-		"message": "预览启动中，等待设备推流",
+		"message": "预览启动成功，等待设备推流（约3-5秒）",
 		"data": map[string]interface{}{
 			"device_id":  deviceID,
 			"channel_id": req.ChannelID,
@@ -270,6 +273,7 @@ func (s *Server) handleStartGB28181Preview(w http.ResponseWriter, r *http.Reques
 			"ws_flv_url": urls.WsFlvURL,
 			"hls_url":    urls.HlsURL,
 			"rtmp_url":   res.RtmpURL,
+			"tip":        "请等待3-5秒后再播放，设备需要时间建立RTP连接",
 		},
 	})
 }
