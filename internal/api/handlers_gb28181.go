@@ -433,7 +433,7 @@ func (s *Server) handleTestGB28181ChannelPreview(w http.ResponseWriter, r *http.
 
 	testStreamURL := "rtmp://ns8.indexforce.com/home/mystream"
 
-	res, err := s.previewManager.StartRTSPProxy(channelID, testStreamURL, app, zlmHost, httpPort, rtmpPort)
+	res, err := s.previewManager.StartRTSPProxy(channelID, testStreamURL, app, zlmHost, httpPort, rtmpPort, "", "")
 	if err != nil {
 		debug.Error("api", "添加流代理失败: %v", err)
 		respondInternalError(w, fmt.Sprintf("添加流代理失败: %v", err))

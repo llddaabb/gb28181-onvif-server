@@ -303,21 +303,23 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	onvifGroup := r.PathPrefix("/api/onvif").Subrouter()
 	onvifGroup.HandleFunc("/devices", s.handleGetONVIFDevices).Methods("GET")
 	onvifGroup.HandleFunc("/devices", s.handleAddONVIFDevice).Methods("POST")
-	onvifGroup.HandleFunc("/devices/{id}", s.handleGetONVIFDevice).Methods("GET")
-	onvifGroup.HandleFunc("/devices/{id}", s.handleRemoveONVIFDevice).Methods("DELETE")
-	onvifGroup.HandleFunc("/devices/{id}/refresh", s.handleRefreshONVIFDevice).Methods("PUT")
-	onvifGroup.HandleFunc("/devices/{id}/profiles", s.handleGetONVIFProfiles).Methods("GET")
-	onvifGroup.HandleFunc("/devices/{id}/snapshot", s.handleGetONVIFSnapshot).Methods("GET")
-	onvifGroup.HandleFunc("/devices/{id}/presets", s.handleGetONVIFPresets).Methods("GET")
-	onvifGroup.HandleFunc("/devices/{id}/auth/check", s.handleCheckONVIFAuth).Methods("POST")
-	onvifGroup.HandleFunc("/devices/{id}/channels/sync", s.handleSyncONVIFChannels).Methods("POST")
-	onvifGroup.HandleFunc("/devices/{id}/preset", s.handleSetONVIFPreset).Methods("POST")
-	onvifGroup.HandleFunc("/devices/{id}/preset/{token}", s.handleGotoONVIFPreset).Methods("POST")
-	onvifGroup.HandleFunc("/devices/{id}/preview/start", s.handleStartONVIFPreview).Methods("POST")
-	onvifGroup.HandleFunc("/devices/{id}/preview/stop", s.handleStopONVIFPreview).Methods("POST")
-	onvifGroup.HandleFunc("/discover", s.handleDiscoverONVIFDevices).Methods("POST")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}", s.handleGetONVIFDevice).Methods("GET")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}", s.handleDeleteONVIFDevice).Methods("DELETE")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/refresh", s.handleRefreshONVIFDevice).Methods("POST")
 	onvifGroup.HandleFunc("/batch-add", s.handleBatchAddONVIFDevices).Methods("POST")
-	onvifGroup.HandleFunc("/statistics", s.handleGetONVIFStatistics).Methods("GET")
+
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/profiles", s.handleGetONVIFProfiles).Methods("GET")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/snapshot", s.handleGetONVIFSnapshotURI).Methods("GET")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/presets", s.handleGetONVIFPresets).Methods("GET")
+
+	// ONVIF PTZ 控制路由
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/ptz-control", s.handleONVIFPTZControl).Methods("POST")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/update-credentials", s.handleONVIFUpdateConfig).Methods("POST")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/credentials", s.handleONVIFUpdateConfig).Methods("PUT")
+
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/preview/start", s.handleStartONVIFPreview).Methods("POST")
+	onvifGroup.HandleFunc("/devices/{id:[^/]+}/preview/stop", s.handleStopONVIFPreview).Methods("POST")
+	onvifGroup.HandleFunc("/discover", s.handleGetONVIFDevices).Methods("POST")
 
 	// 媒体流API
 	streamGroup := r.PathPrefix("/api/stream").Subrouter()
@@ -388,7 +390,6 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	r.PathPrefix("/zlm/").HandlerFunc(s.handleZLMProxy)
 
 	// 静态文件服务（必须在最后）
-
 	staticDir := "frontend/dist"
 	r.PathPrefix("/assets/").Handler(http.StripPrefix("/assets/", http.FileServer(http.Dir(staticDir+"/assets"))))
 	r.PathPrefix("/jessibuca/").Handler(http.StripPrefix("/jessibuca/", http.FileServer(http.Dir(staticDir+"/jessibuca"))))
@@ -522,19 +523,8 @@ func (s *Server) handleZLMProxy(w http.ResponseWriter, r *http.Request) {
 		zlmPort = 8081
 	}
 
-	// 构建 ZLM 目标 URL - 使用 r.URL.Path 并去掉 /zlm 前缀，保留起始斜杠
-	// 如果存在查询字符串，则附加 RawQuery
-	rawPath := strings.TrimPrefix(r.URL.Path, "/zlm")
-	if rawPath == "" {
-		rawPath = "/"
-	}
-	if !strings.HasPrefix(rawPath, "/") {
-		rawPath = "/" + rawPath
-	}
-	targetURL := fmt.Sprintf("http://127.0.0.1:%d%s", zlmPort, rawPath)
-	if r.URL.RawQuery != "" {
-		targetURL = targetURL + "?" + r.URL.RawQuery
-	}
+	// 构建 ZLM 目标 URL
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d%s", zlmPort, r.URL.RequestURI())
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		http.Error(w, "Invalid URL", http.StatusBadRequest)
@@ -544,15 +534,13 @@ func (s *Server) handleZLMProxy(w http.ResponseWriter, r *http.Request) {
 	// 创建反向代理
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// 设置 Director：将请求的 scheme/host/path/query 指向 ZLM 目标的对应字段。
-	// 使用精确赋值可避免因路径拼接导致的错误路由（例如重复前缀），
-	// 但仍保留原始请求的 header（例如 Origin、Authorization 等）。
+	// 保持默认 Director 行为以支持 websocket 升级
+	// 避免直接覆盖 req.URL，这会破坏升级逻辑
+	// 仅在默认 Director 基础上确保 Host 设置正确
+	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = target.Scheme
-		req.URL.Host = target.Host
-		req.URL.Path = target.Path
-		req.URL.RawQuery = target.RawQuery
-		// 保持原始 Host 头为目标主机，方便 ZLM 根据 Host 处理请求
+		originalDirector(req)
+		// 不覆盖 req.URL，保留 path/query，设置 host
 		req.Host = target.Host
 	}
 
@@ -598,7 +586,16 @@ func (s *Server) startPreview(r *http.Request, deviceID, channelID, rtspURL, app
 
 	if rtspURL != "" {
 		// ONVIF 或其他 RTSP 流
-		res, err = s.previewManager.StartRTSPProxy(deviceID, rtspURL, app, zlmHost, httpPort, rtmpPort)
+		rtspUser := ""
+		rtspPassword := ""
+		// 尝试从 onvifManager 获取设备凭据（仅在 app 为 onvif 时）
+		if app == "onvif" && s.onvifManager != nil {
+			if dev, ok := s.onvifManager.GetDeviceByID(deviceID); ok {
+				rtspUser = dev.Username
+				rtspPassword = dev.Password
+			}
+		}
+		res, err = s.previewManager.StartRTSPProxy(deviceID, rtspURL, app, zlmHost, httpPort, rtmpPort, rtspUser, rtspPassword)
 	} else {
 		// GB28181 流
 		res, err = s.previewManager.StartChannelPreview(deviceID, channelID, app, zlmHost, httpPort, rtmpPort)

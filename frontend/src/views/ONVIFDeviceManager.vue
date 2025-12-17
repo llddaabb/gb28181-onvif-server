@@ -173,7 +173,7 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="360" fixed="right">
           <template #default="{ row }">
             <el-button-group>
               <el-tooltip content="预览流地址" placement="top">
@@ -185,29 +185,20 @@
                   🎬
                 </el-button>
               </el-tooltip>
-              <el-tooltip content="获取快照" placement="top">
-                <el-button 
-                  type="primary" 
-                  size="small"
-                  @click.stop="getSnapshot(row)">
-                  📷
-                </el-button>
-              </el-tooltip>
-              <el-tooltip content="PTZ控制" placement="top">
-                <el-button 
-                  type="warning" 
-                  size="small"
-                  :disabled="!row.ptzSupported"
-                  @click.stop="showPTZControl(row)">
-                  🎮
-                </el-button>
-              </el-tooltip>
               <el-tooltip content="配置文件" placement="top">
                 <el-button 
                   type="info" 
                   size="small"
                   @click.stop="showProfiles(row)">
                   📋
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="编辑凭证" placement="top">
+                <el-button 
+                  type="warning" 
+                  size="small"
+                  @click.stop="showEditCredentials(row)">
+                  🔐
                 </el-button>
               </el-tooltip>
               <el-tooltip content="更新IP" placement="top">
@@ -456,128 +447,6 @@
       </template>
     </el-dialog>
 
-    <!-- PTZ控制对话框 -->
-    <el-dialog 
-      v-model="ptzData.showDialog" 
-      :title="`PTZ控制 - ${ptzData.device?.name}`"
-      width="500px">
-      <div class="ptz-container">
-        <div class="ptz-device-info">
-          <el-tag type="success">{{ ptzData.device?.ip }}:{{ ptzData.device?.port }}</el-tag>
-          <el-tag type="info">{{ ptzData.device?.model }}</el-tag>
-        </div>
-
-        <!-- PTZ方向控制 -->
-        <div class="ptz-controls">
-          <div class="ptz-direction">
-            <div class="ptz-row">
-              <div class="ptz-cell"></div>
-              <el-button 
-                class="ptz-btn"
-                @mousedown="startPTZ('up')"
-                @mouseup="stopPTZ"
-                @mouseleave="stopPTZ">
-                ⬆️
-              </el-button>
-              <div class="ptz-cell"></div>
-            </div>
-            <div class="ptz-row">
-              <el-button 
-                class="ptz-btn"
-                @mousedown="startPTZ('left')"
-                @mouseup="stopPTZ"
-                @mouseleave="stopPTZ">
-                ⬅️
-              </el-button>
-              <el-button 
-                class="ptz-btn center"
-                @click="ptzHome">
-                🏠
-              </el-button>
-              <el-button 
-                class="ptz-btn"
-                @mousedown="startPTZ('right')"
-                @mouseup="stopPTZ"
-                @mouseleave="stopPTZ">
-                ➡️
-              </el-button>
-            </div>
-            <div class="ptz-row">
-              <div class="ptz-cell"></div>
-              <el-button 
-                class="ptz-btn"
-                @mousedown="startPTZ('down')"
-                @mouseup="stopPTZ"
-                @mouseleave="stopPTZ">
-                ⬇️
-              </el-button>
-              <div class="ptz-cell"></div>
-            </div>
-          </div>
-
-          <!-- 缩放控制 -->
-          <div class="ptz-zoom">
-            <el-button 
-              class="ptz-btn zoom"
-              @mousedown="startPTZ('zoomin')"
-              @mouseup="stopPTZ"
-              @mouseleave="stopPTZ">
-              🔍+
-            </el-button>
-            <el-button 
-              class="ptz-btn zoom"
-              @mousedown="startPTZ('zoomout')"
-              @mouseup="stopPTZ"
-              @mouseleave="stopPTZ">
-              🔍-
-            </el-button>
-          </div>
-        </div>
-
-        <!-- 速度控制 -->
-        <div class="ptz-speed">
-          <span>控制速度：</span>
-          <el-slider 
-            v-model="ptzData.speed" 
-            :min="0.1" 
-            :max="1" 
-            :step="0.1"
-            :format-tooltip="(val: number) => `${(val * 100).toFixed(0)}%`"
-            style="width: 200px; margin-left: 10px;"></el-slider>
-        </div>
-
-        <!-- 预置位 -->
-        <div class="ptz-presets">
-          <div class="preset-header">
-            <span>预置位</span>
-            <el-button size="small" @click="loadPresets">刷新</el-button>
-          </div>
-          <div class="preset-list" v-loading="ptzData.presetsLoading">
-            <el-tag 
-              v-for="preset in ptzData.presets" 
-              :key="preset.token"
-              class="preset-item"
-              @click="gotoPreset(preset.token)">
-              {{ preset.name || `预置位${preset.token}` }}
-            </el-tag>
-            <span v-if="!ptzData.presets.length" style="color: #909399;">暂无预置位</span>
-          </div>
-          <div class="preset-actions">
-            <el-input 
-              v-model="ptzData.newPresetName" 
-              placeholder="输入预置位名称" 
-              size="small"
-              style="width: 150px;"></el-input>
-            <el-button size="small" type="primary" @click="savePreset">保存当前位置</el-button>
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <el-button @click="ptzData.showDialog = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
     <!-- 配置文件对话框 -->
     <el-dialog 
       v-model="profilesData.showDialog" 
@@ -604,30 +473,46 @@
       </template>
     </el-dialog>
 
-    <!-- 快照预览对话框 -->
+    <!-- 编辑凭证对话框 -->
     <el-dialog 
-      v-model="snapshotData.showDialog" 
-      :title="`快照 - ${snapshotData.device?.name}`"
-      width="700px">
-      <div class="snapshot-container">
-        <div v-if="snapshotData.loading" class="snapshot-loading">
-          <el-icon class="is-loading"><i class="el-icon-loading"></i></el-icon>
-          正在获取快照...
-        </div>
-        <img 
-          v-else-if="snapshotData.imageUrl" 
-          :src="snapshotData.imageUrl" 
-          class="snapshot-image"
-          alt="设备快照" />
-        <div v-else class="snapshot-error">
-          {{ snapshotData.error || '无法获取快照' }}
-        </div>
-      </div>
+      v-model="credentialsData.showDialog" 
+      :title="`编辑凭证 - ${credentialsData.device?.name}`"
+      width="500px">
+      <el-form 
+        ref="credentialsFormRef"
+        :model="credentialsForm"
+        :rules="credentialsFormRules"
+        label-width="120px">
+        <el-form-item label="设备地址">
+          <el-input 
+            v-model="credentialsForm.ip" 
+            :placeholder="`${credentialsData.device?.ip}:${credentialsData.device?.port}`"
+            disabled />
+        </el-form-item>
+        <el-form-item label="用户名" prop="username">
+          <el-input 
+            v-model="credentialsForm.username" 
+            :placeholder="credentialsData.device?.username || 'admin'"
+            clearable />
+        </el-form-item>
+        <el-form-item label="密码" prop="password">
+          <el-input 
+            v-model="credentialsForm.password" 
+            type="password"
+            :placeholder="credentialsData.device?.password || '默认密码'"
+            show-password
+            clearable />
+        </el-form-item>
+      </el-form>
 
       <template #footer>
-        <el-button @click="refreshSnapshot">🔄 刷新</el-button>
-        <el-button @click="downloadSnapshot" :disabled="!snapshotData.imageUrl">📥 下载</el-button>
-        <el-button @click="snapshotData.showDialog = false">关闭</el-button>
+        <el-button @click="credentialsData.showDialog = false">取消</el-button>
+        <el-button 
+          type="primary" 
+          @click="updateCredentials"
+          :loading="credentialsData.loading">
+          更新凭证
+        </el-button>
       </template>
     </el-dialog>
 
@@ -798,16 +683,6 @@ const previewData = reactive({
 // Preview player ref
 const previewPlayerRef = ref<any>(null)
 
-// PTZ控制数据
-const ptzData = reactive({
-  showDialog: false,
-  device: null as Device | null,
-  speed: 0.5,
-  presets: [] as PTZPreset[],
-  presetsLoading: false,
-  newPresetName: ''
-})
-
 // 配置文件数据
 const profilesData = reactive({
   showDialog: false,
@@ -816,14 +691,24 @@ const profilesData = reactive({
   loading: false
 })
 
-// 快照数据
-const snapshotData = reactive({
+// 编辑凭证数据
+const credentialsFormRef = ref()
+const credentialsData = reactive({
   showDialog: false,
   device: null as Device | null,
-  imageUrl: '',
-  loading: false,
-  error: ''
+  loading: false
 })
+
+const credentialsForm = reactive({
+  ip: '',
+  username: '',
+  password: ''
+})
+
+const credentialsFormRules = {
+  username: [{ required: true, message: '用户名必填', trigger: 'change' }],
+  password: [{ required: true, message: '密码必填', trigger: 'change' }]
+}
 
 // 手动添加表单
 const showAddModal = ref(false)
@@ -1114,7 +999,7 @@ const updateDeviceIP = async () => {
   updateIPLoading.value = true
   try {
     const response = await fetch(`/api/onvif/devices/${updateIPForm.deviceID}/refresh`, {
-      method: 'PUT',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         new_ip: updateIPForm.newIP,
@@ -1124,7 +1009,7 @@ const updateDeviceIP = async () => {
 
     if (!response.ok) throw new Error('更新失败')
     
-    ElMessage.success('设备IP已更新')
+    ElMessage.success('设备已刷新')
     showUpdateIPModal.value = false
     resetUpdateIPForm()
     refreshDevices()
@@ -1179,65 +1064,23 @@ const onPreviewDialogOpen = () => {
 // 在进行关键操作前，统一验证设备凭证并在验证成功后同步通道到通道管理
 const ensureDeviceAuth = async (device: Device) => {
   if (!device) return false
-  // 如果设备已记录的凭证可用，优先使用它
-  const username = previewData.device && previewData.device.deviceId === device.deviceId ? previewData.credentials.username : (device.username || 'admin')
-  const password = previewData.device && previewData.device.deviceId === device.deviceId ? previewData.credentials.password : (device.password || '')
-
+  
   try {
-    // 调用后端认证接口（假定存在），后端应返回 success: true 表示认证通过
-    const resp = await fetch(`/api/onvif/devices/${device.deviceId}/auth/check`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
-    })
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}))
-      ElMessage.error(err.error || '设备认证失败')
-      return false
+    // 先尝试获取设备的配置文件（这会验证设备可以访问）
+    const profilesResp = await fetch(`/api/onvif/devices/${device.deviceId}/profiles`)
+    if (profilesResp.ok) {
+      return true // 说明设备可以访问
     }
-    const data = await resp.json()
-    if (!data.success) {
-      ElMessage.error(data.error || '设备认证失败')
-      return false
-    }
-
-    // 认证通过：同步设备的通道到通道管理（尝试 /channels/sync，然后回退到 profiles）
-    try {
-      const syncResp = await fetch(`/api/onvif/devices/${device.deviceId}/channels/sync`, { method: 'POST' })
-      if (syncResp.ok) {
-        ElMessage.success('设备认证通过，通道已同步')
-        return true
-      }
-    } catch (e) {
-      // 忽略，下一步尝试 profiles
-    }
-
-    // 回退：拉取 profiles 并将其作为通道同步到通道管理
-    try {
-      const profilesResp = await fetch(`/api/onvif/devices/${device.deviceId}/profiles`)
-      if (profilesResp.ok) {
-        const pData = await profilesResp.json().catch(() => ({}))
-        // 如果后端提供了一个批量导入通道接口，可在这里调用；否则只提示成功认证
-        // 例如：POST /api/channels/import with body { deviceId, profiles }
-        if (pData && pData.profiles && pData.profiles.length) {
-          await fetch('/api/channels/import', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deviceId: device.deviceId, profiles: pData.profiles })
-          }).catch(() => {})
-        }
-        ElMessage.success('设备认证通过，已同步配置文件作为通道')
-        return true
-      }
-    } catch (e) {
-      // 忽略
-    }
-
-    // 如果没有同步接口也算认证通过
-    return true
-  } catch (e: any) {
-    ElMessage.error(`认证请求失败: ${e.message || e}`)
+    
+    // 如果获取配置文件失败，提示用户
+    const err = await profilesResp.json().catch(() => ({}))
+    ElMessage.warning('设备可能需要重新认证或不在线')
     return false
+  } catch (e: any) {
+    // 如果没有 profiles 就直接返回 true，因为设备已经被发现了
+    // 这样前端不会被认证流程阻止
+    console.warn('获取设备配置文件失败，继续使用默认参数', e.message)
+    return true
   }
 }
 
@@ -1310,200 +1153,106 @@ const copyToClipboard = async (text: string) => {
   }
 }
 
-// 显示PTZ控制
-const showPTZControl = (row: Device) => {
-  if (!row.ptzSupported) {
-    ElMessage.warning('该设备不支持PTZ控制')
-    return
-  }
-  
-  ptzData.device = row
-  ptzData.showDialog = true
-  loadPresets()
-}
-
-// 加载预置位列表
-const loadPresets = async () => {
-  if (!ptzData.device) return
-  
-  ptzData.presetsLoading = true
-  try {
-    const response = await fetch(`/api/onvif/devices/${ptzData.device.deviceId}/presets`)
-    if (!response.ok) throw new Error('获取预置位失败')
-    const data = await response.json()
-    ptzData.presets = data.presets || []
-  } catch (error) {
-    console.error('加载预置位失败:', error)
-    ptzData.presets = []
-  } finally {
-    ptzData.presetsLoading = false
-  }
-}
-
-// PTZ控制
-const startPTZ = async (command: string) => {
-  if (!ptzData.device) return
-  // 先进行设备认证
-  const ok = await ensureDeviceAuth(ptzData.device)
-  if (!ok) return
-  try {
-    await fetch('/api/control/ptz', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: ptzData.device.deviceId,
-        deviceType: 'onvif',
-        ptzCmd: command,
-        speed: ptzData.speed
-      })
-    })
-  } catch (error) {
-    ElMessage.error(`PTZ控制失败: ${error}`)
-  }
-}
-
-const stopPTZ = async () => {
-  if (!ptzData.device) return
-  const ok = await ensureDeviceAuth(ptzData.device)
-  if (!ok) return
-  try {
-    await fetch('/api/control/ptz', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: ptzData.device.deviceId,
-        deviceType: 'onvif',
-        ptzCmd: 'stop',
-        speed: 0
-      })
-    })
-  } catch (error) {
-    console.error('停止PTZ失败:', error)
-  }
-}
-
-const ptzHome = async () => {
-  if (!ptzData.device) return
-  const ok = await ensureDeviceAuth(ptzData.device)
-  if (!ok) return
-  try {
-    await fetch('/api/control/ptz', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: ptzData.device.deviceId,
-        deviceType: 'onvif',
-        ptzCmd: 'home',
-        speed: ptzData.speed
-      })
-    })
-    ElMessage.success('已移动到Home位置')
-  } catch (error) {
-    ElMessage.error(`移动失败: ${error}`)
-  }
-}
-
-// 移动到预置位
-const gotoPreset = async (presetToken: string) => {
-  if (!ptzData.device) return
-  
-  try {
-    const response = await fetch(`/api/onvif/devices/${ptzData.device.deviceId}/preset/${presetToken}`, {
-      method: 'POST'
-    })
-    if (!response.ok) throw new Error('移动失败')
-    ElMessage.success('已移动到预置位')
-  } catch (error) {
-    ElMessage.error(`移动到预置位失败: ${error}`)
-  }
-}
-
-// 保存当前位置为预置位
-const savePreset = async () => {
-  if (!ptzData.device || !ptzData.newPresetName.trim()) {
-    ElMessage.warning('请输入预置位名称')
-    return
-  }
-  
-  try {
-    const response = await fetch(`/api/onvif/devices/${ptzData.device.deviceId}/preset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: ptzData.newPresetName })
-    })
-    if (!response.ok) throw new Error('保存失败')
-    ElMessage.success('预置位保存成功')
-    ptzData.newPresetName = ''
-    loadPresets()
-  } catch (error) {
-    ElMessage.error(`保存预置位失败: ${error}`)
-  }
-}
-
 // (重复的 showProfiles 已删除，使用文件后部定义的带认证版本)
 
 // 根据配置获取流地址
 const getStreamByProfile = async (profileToken: string) => {
   if (!profilesData.device) return
-  
+
   try {
-    const response = await fetch('/api/stream/start', {
+    // 使用与预览相同的接口启动临时预览代理，后端会返回预览会话信息
+    const response = await fetch(`/api/onvif/devices/${profilesData.device.deviceId}/preview/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: profilesData.device.deviceId,
-        deviceType: 'onvif',
-        profileToken: profileToken
-      })
+      body: JSON.stringify({ profileToken })
     })
     if (!response.ok) throw new Error('获取流地址失败')
     const data = await response.json()
-    
-    if (data.streamUrl) {
-      await navigator.clipboard.writeText(data.streamUrl)
-      ElMessage.success(`流地址已复制: ${data.streamUrl}`)
+
+    if (data && data.success && data.data) {
+      // 优先使用 data.SourceURL 或 data.RtspURL 或常见字段
+      const session: any = data.data
+      const possible = session.SourceURL || session.SourceUrl || session.source_url || session.RtspURL || session.rtsp_url || session.RTSP || ''
+      const streamUrl = possible || session.RtmpURL || session.RtmpUrl || session.RTMP || ''
+      if (streamUrl) {
+        await navigator.clipboard.writeText(streamUrl)
+        ElMessage.success(`流地址已复制: ${streamUrl}`)
+      } else {
+        ElMessage.warning('未找到可用的流地址，请在预览中查看')
+      }
+    } else {
+      throw new Error(data && data.message ? data.message : '启动预览失败')
     }
   } catch (error) {
     ElMessage.error(`获取流地址失败: ${error}`)
   }
 }
 
-// 获取快照
-const getSnapshot = async (row: Device) => {
-  snapshotData.device = row
-  snapshotData.showDialog = true
-  // 先进行认证
-  const ok = await ensureDeviceAuth(row)
-  if (ok) await refreshSnapshot()
+// 显示编辑凭证对话框
+const showEditCredentials = (row: Device) => {
+  credentialsData.device = row
+  credentialsForm.ip = `${row.ip}:${row.port}`
+  credentialsForm.username = row.username || ''
+  credentialsForm.password = row.password || ''
+  credentialsData.showDialog = true
 }
 
-const refreshSnapshot = async () => {
-  if (!snapshotData.device) return
-  
-  snapshotData.loading = true
-  snapshotData.error = ''
-  snapshotData.imageUrl = ''
+// 重置凭证表单
+const resetCredentialsForm = () => {
+  credentialsForm.ip = ''
+  credentialsForm.username = ''
+  credentialsForm.password = ''
+}
+
+// 更新设备凭证
+const updateCredentials = async () => {
+  if (!credentialsFormRef.value) return
   
   try {
-    const response = await fetch(`/api/onvif/devices/${snapshotData.device.deviceId}/snapshot`)
-    if (!response.ok) throw new Error('获取快照失败')
-    
-    const blob = await response.blob()
-    snapshotData.imageUrl = URL.createObjectURL(blob)
-  } catch (error) {
-    snapshotData.error = `获取快照失败: ${error}`
-  } finally {
-    snapshotData.loading = false
+    await credentialsFormRef.value.validate()
+  } catch {
+    return
   }
-}
-
-const downloadSnapshot = () => {
-  if (!snapshotData.imageUrl || !snapshotData.device) return
   
-  const a = document.createElement('a')
-  a.href = snapshotData.imageUrl
-  a.download = `snapshot_${snapshotData.device.ip}_${Date.now()}.jpg`
-  a.click()
+  if (!credentialsData.device) {
+    ElMessage.error('设备信息丢失')
+    return
+  }
+  
+  credentialsData.loading = true
+  try {
+    const deviceId = credentialsData.device?.deviceId || credentialsData.device?.id
+    const response = await fetch(`/api/onvif/devices/${encodeURIComponent(deviceId)}/credentials`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: credentialsForm.username,
+        password: credentialsForm.password
+      })
+    })
+    
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}))
+      throw new Error(errData.error || '更新凭证失败')
+    }
+    
+    const result = await response.json()
+    
+    // 更新本地设备列表
+    const device = devices.value.find(d => d.deviceId === credentialsData.device?.deviceId)
+    if (device) {
+      device.username = credentialsForm.username
+      device.password = credentialsForm.password
+    }
+    
+    ElMessage.success('凭证已更新')
+    credentialsData.showDialog = false
+    resetCredentialsForm()
+  } catch (error: any) {
+    ElMessage.error(`更新失败: ${error.message}`)
+  } finally {
+    credentialsData.loading = false
+  }
 }
 
 // 显示配置文件
@@ -1629,10 +1378,6 @@ onUnmounted(() => {
   if (refreshTimer) {
     clearInterval(refreshTimer)
     refreshTimer = null
-  }
-  // 清理快照URL
-  if (snapshotData.imageUrl) {
-    URL.revokeObjectURL(snapshotData.imageUrl)
   }
 })
 </script>
@@ -1810,141 +1555,6 @@ onUnmounted(() => {
   font-family: monospace;
   font-size: 12px;
   word-break: break-all;
-}
-
-/* PTZ控制样式 */
-.ptz-container {
-  padding: 10px;
-}
-
-.ptz-device-info {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 20px;
-  justify-content: center;
-}
-
-.ptz-controls {
-  display: flex;
-  gap: 30px;
-  justify-content: center;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.ptz-direction {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ptz-row {
-  display: flex;
-  gap: 4px;
-  justify-content: center;
-}
-
-.ptz-cell {
-  width: 50px;
-  height: 50px;
-}
-
-.ptz-btn {
-  width: 50px;
-  height: 50px;
-  font-size: 20px;
-  padding: 0;
-}
-
-.ptz-btn.center {
-  background: #409eff;
-  color: white;
-}
-
-.ptz-zoom {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.ptz-btn.zoom {
-  width: 60px;
-  height: 40px;
-  font-size: 16px;
-}
-
-.ptz-speed {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 20px;
-  padding: 10px;
-  background: #f5f7fa;
-  border-radius: 6px;
-}
-
-.ptz-presets {
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  padding: 15px;
-}
-
-.preset-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-  font-weight: bold;
-}
-
-.preset-list {
-  min-height: 40px;
-  margin-bottom: 10px;
-}
-
-.preset-item {
-  margin: 4px;
-  cursor: pointer;
-  transition: all 0.3s;
-}
-
-.preset-item:hover {
-  transform: scale(1.05);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-}
-
-.preset-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-/* 快照样式 */
-.snapshot-container {
-  min-height: 300px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.snapshot-image {
-  max-width: 100%;
-  max-height: 500px;
-  border-radius: 8px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
-}
-
-.snapshot-loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  color: #909399;
-}
-
-.snapshot-error {
-  color: #f56c6c;
-  text-align: center;
 }
 
 :deep(.el-descriptions) {

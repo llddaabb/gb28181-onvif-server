@@ -210,7 +210,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 	if s.config.ONVIF != nil {
 		config["onvif"] = map[string]interface{}{
-			"discoveryInterval": s.config.ONVIF.DiscoveryInterval,
+			"checkInterval": s.config.ONVIF.CheckInterval,
 		}
 	}
 

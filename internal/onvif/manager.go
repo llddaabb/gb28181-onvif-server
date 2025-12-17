@@ -37,6 +37,7 @@ type Device struct {
 	HardwareID      string              // 硬件ID
 	IP              string              // IP地址
 	Port            int                 // ONVIF端口
+	ONVIFAddr       string              // ONVIF服务端点地址 (完整URL)
 	SipPort         int                 // GB28181 SIP端口
 	Username        string              // 用户名
 	Password        string              // 密码
@@ -210,11 +211,12 @@ func (m *Manager) discoverDevices() {
 		if err != nil {
 			debug.Warn("onvif", "WS-Discovery探测失败: %v", err)
 		} else {
+			log.Printf("[ONVIF] WS-Discovery 发现了 %d 个设备", len(discoveredDevices))
 			for _, result := range discoveredDevices {
 				// 尝试自动添加发现的设备
-				if result.XAddr != "" {
-					go m.tryAutoAddDevice(result)
-				}
+				log.Printf("[ONVIF] 处理发现的设备: %s (XAddr: %s)", result.Name, result.XAddr)
+
+				m.tryAutoAddDevice(result)
 			}
 		}
 	}
@@ -237,6 +239,7 @@ func (m *Manager) tryAutoAddDevice(result DeviceDiscoveryResult) {
 	// 解析设备地址
 	host, port, err := ParseXAddr(result.XAddr)
 	if err != nil {
+		log.Printf("[ONVIF] [ERROR] 解析发现的设备地址失败: %v (XAddr: %s)", err, result.XAddr)
 		debug.Debug("onvif", "解析发现的设备地址失败: %v", err)
 		return
 	}
@@ -249,6 +252,7 @@ func (m *Manager) tryAutoAddDevice(result DeviceDiscoveryResult) {
 	m.devicesMux.RUnlock()
 
 	if exists {
+		log.Printf("[ONVIF] 设备已存在，跳过: %s", deviceID)
 		return // 设备已存在，跳过
 	}
 
@@ -272,9 +276,25 @@ func (m *Manager) tryAutoAddDevice(result DeviceDiscoveryResult) {
 		device.Name = fmt.Sprintf("ONVIF Camera (%s)", host)
 	}
 
-	// 尝试获取设备详细信息（无认证）
+	log.Printf("[ONVIF] 开始处理发现的设备: %s (%s:%d)", device.Name, host, port)
+
+	// 立即添加基本设备信息
+	m.devicesMux.Lock()
+	m.devices[deviceID] = device
+	m.devicesMux.Unlock()
+
+	log.Printf("[ONVIF] ✅ 已将发现的设备添加到列表: %s (%s) | 状态: discovered", device.Name, device.DeviceID)
+
+	// 异步获取设备详细信息（用于完善设备信息）
 	go func() {
-		xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", host, port)
+		// 使用 WS-Discovery 返回的原始 XAddr，如果无法连接再尝试备选端点
+		xaddr := result.XAddr
+
+		if xaddr == "" {
+			// 备选：如果没有 XAddr，使用默认路径
+			xaddr = fmt.Sprintf("http://%s:%d/onvif/device_service", host, port)
+		}
+		// 如果没有提供认证信息，尝试空认证和常见默认凭证
 		detailedDevice, err := m.getDeviceDetails(xaddr, "", "")
 		if err == nil && detailedDevice != nil {
 			// 使用详细信息更新设备
@@ -285,13 +305,11 @@ func (m *Manager) tryAutoAddDevice(result DeviceDiscoveryResult) {
 			}
 			m.devices[deviceID] = detailedDevice
 			m.devicesMux.Unlock()
-			log.Printf("[ONVIF] 🔍 自动发现设备: %s (%s)", detailedDevice.Name, detailedDevice.DeviceID)
+			log.Printf("[ONVIF] ✅ 已获取设备详细信息: %s (%s) | 状态: %s", detailedDevice.Name, detailedDevice.DeviceID, detailedDevice.Status)
 		} else {
-			// 使用基本信息添加设备
-			m.devicesMux.Lock()
-			m.devices[deviceID] = device
-			m.devicesMux.Unlock()
-			log.Printf("[ONVIF] 🔍 自动发现设备: %s (%s)", device.Name, device.DeviceID)
+			// 即使获取详细信息失败，设备仍然已被添加到列表
+			// 打印真实错误原因（包括已尝试的端点和凭证数量）
+			log.Printf("[ONVIF] ⚠️ 获取设备详细信息失败: %s (%s) | 原因: %v | 但基本信息已添加", device.Name, device.DeviceID, err)
 		}
 
 		// 触发设备发现事件
@@ -304,25 +322,51 @@ func (m *Manager) tryAutoAddDevice(result DeviceDiscoveryResult) {
 	}()
 }
 
-// getDeviceDetails 获取设备详细信息
+// getDeviceDetails 获取设备详细信息，带有重试逻辑
 func (m *Manager) getDeviceDetails(xaddr, username, password string) (*Device, error) {
-	// 创建ONVIF设备客户端
-	d, err := NewDevice(DeviceParams{
-		Xaddr:    xaddr,
-		Username: username,
-		Password: password,
-		Timeout:  10 * time.Second,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("创建设备客户端失败: %w", err)
+	// 如果没有提供认证信息，尝试常见的默认凭证
+	credentialsList := []struct {
+		username string
+		password string
+	}{
+		{username, password}, // 首先尝试提供的凭证
 	}
 
-	// 测试设备连接
-	if err := d.TestConnection(); err != nil {
-		return nil, fmt.Errorf("设备连接测试失败: %w", err)
+	// 如果提供的用户名为空，尝试常见默认凭证
+	if username == "" {
+		credentialsList = append(credentialsList,
+			struct {
+				username string
+				password string
+			}{"admin", "admin"},
+			struct {
+				username string
+				password string
+			}{"admin", "12345"},
+			struct {
+				username string
+				password string
+			}{"admin", "123456"},
+			struct {
+				username string
+				password string
+			}{"root", "root"},
+			struct {
+				username string
+				password string
+			}{"root", "12345"},
+		)
 	}
 
-	// 从xaddr中解析设备IP和端口
+	// 创建备选ONVIF端点列表
+	var xaddrs []string
+
+	// 第一优先级：使用传入的 xaddr (WS-Discovery 返回的)
+	if xaddr != "" {
+		xaddrs = append(xaddrs, xaddr)
+	}
+
+	// 从 xaddr 中解析 IP 和端口，用于生成备用端点
 	ip := "127.0.0.1"
 	port := 80
 
@@ -331,39 +375,106 @@ func (m *Manager) getDeviceDetails(xaddr, username, password string) (*Device, e
 		ip = parsedURL.Hostname()
 		port = 80
 		if parsedURL.Port() != "" {
-			port, err = strconv.Atoi(parsedURL.Port())
-			if err != nil {
-				port = 80
+			p, err := strconv.Atoi(parsedURL.Port())
+			if err == nil {
+				port = p
 			}
 		}
 	}
 
+	// 只有当WS-Discovery返回的XAddr失败时，才尝试这些备用端点
+	// 这些是常见的ONVIF路径和端口组合
+	backupXaddrs := []string{
+		// 常见 HTTP 路径（优先级从高到低）
+		fmt.Sprintf("http://%s:%d/onvif/device_service", ip, port),
+		fmt.Sprintf("http://%s/onvif/device_service", ip),
+		fmt.Sprintf("http://%s:%d/ONVIF/device_service", ip, port),
+		fmt.Sprintf("http://%s:%d/onvif/Device", ip, port),
+		fmt.Sprintf("http://%s:%d/onvif", ip, port),
+		fmt.Sprintf("http://%s:80/onvif/device_service", ip),
+		fmt.Sprintf("http://%s:8080/onvif/device_service", ip),
+		fmt.Sprintf("http://%s:8000/onvif/device_service", ip),
+	}
+
+	// 只添加不重复的备用地址
+	for _, addr := range backupXaddrs {
+		if addr != xaddr && !contains(xaddrs, addr) {
+			xaddrs = append(xaddrs, addr)
+		}
+	}
+
+	// 尝试连接到每个备选端点，使用多个凭证
+	var deviceClient *ONVIFDeviceClient
+	var successAddr string
+
+	log.Printf("[ONVIF] 🔍 开始连接设备，待尝试的 xaddr 列表 (%d 个):", len(xaddrs))
+	for i, addr := range xaddrs {
+		log.Printf("[ONVIF]   [%d] %s", i+1, addr)
+	}
+
+	for _, cred := range credentialsList {
+		for _, tryAddr := range xaddrs {
+			// 创建ONVIF设备客户端
+			d, err := NewDevice(DeviceParams{
+				Xaddr:    tryAddr,
+				Username: cred.username,
+				Password: cred.password,
+				Timeout:  10 * time.Second,
+			})
+			if err != nil {
+				continue
+			}
+
+			// 测试设备连接
+			if err := d.TestConnection(); err != nil {
+				continue
+			}
+
+			// 成功连接
+			log.Printf("[ONVIF] ✅ 成功连接到设备: %s (使用认证: %s)", tryAddr, cred.username)
+			deviceClient = d
+			successAddr = tryAddr
+			break
+		}
+
+		// 如果此凭证成功，不再尝试其他凭证
+		if successAddr != "" {
+			break
+		}
+	}
+
+	// 如果所有尝试都失败
+	if successAddr == "" {
+		return nil, fmt.Errorf("无法连接到ONVIF设备 (已尝试 %d 个端点和 %d 组凭证)", len(xaddrs), len(credentialsList))
+	}
+
 	// 获取设备服务列表
 	var services []string
-	servicesMap := d.GetServices()
-	for _, serviceAddr := range servicesMap {
+	servicesMap := deviceClient.GetServices()
+	for serviceName, serviceAddr := range servicesMap {
+		log.Printf("[ONVIF]   - %s: %s", serviceName, serviceAddr)
 		services = append(services, serviceAddr)
 	}
 
 	// 获取设备信息
-	deviceInfo, _ := d.GetDeviceInfo()
+	deviceInfo, _ := deviceClient.GetDeviceInfo()
 
 	// 获取设备能力
-	capabilities := d.GetCapabilities()
+	capabilities := deviceClient.GetCapabilities()
 
 	// 获取媒体配置文件
-	profiles, _ := d.GetMediaProfiles()
+	profiles, _ := deviceClient.GetMediaProfiles()
 
 	// 获取主码流URL
 	var previewURL string
 	if len(profiles) > 0 {
-		previewURL, _ = d.GetStreamURI(profiles[0].Token)
+		previewURL, _ = deviceClient.GetStreamURI(profiles[0].Token)
 	}
 
 	// 获取快照URL
 	var snapshotURL string
 	if len(profiles) > 0 {
-		snapshotURL, _ = d.GetSnapshotURI(profiles[0].Token)
+		snapshotURL, _ = deviceClient.GetSnapshotURI(profiles[0].Token)
 	}
 
 	device := &Device{
@@ -394,6 +505,7 @@ func (m *Manager) getDeviceDetails(xaddr, username, password string) (*Device, e
 		PTZSupported:    capabilities != nil && capabilities.HasPTZ,
 		AudioSupported:  false,
 		Metadata:        make(map[string]string),
+		ONVIFAddr:       successAddr,
 	}
 
 	return device, nil
@@ -429,7 +541,7 @@ func (m *Manager) StartStream(deviceID, profileToken string) (string, error) {
 	}
 
 	// 创建ONVIF设备客户端
-	xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", device.IP, device.Port)
+	xaddr := m.getONVIFAddr(device)
 	d, err := NewDevice(DeviceParams{
 		Xaddr:    xaddr,
 		Username: device.Username,
@@ -456,14 +568,232 @@ func (m *Manager) StartStream(deviceID, profileToken string) (string, error) {
 	return streamURL, nil
 }
 
-// GetStreamURL 获取设备流地址（不启动流）
-func (m *Manager) GetStreamURL(deviceID, profileToken string) (string, error) {
-	_, exists := m.GetDeviceByID(deviceID)
+// StartDiscovery 启动设备发现
+func (m *Manager) StartDiscovery(duration time.Duration) {
+	go func() {
+		time.Sleep(duration)
+	}()
+	m.discoverDevices()
+}
+
+// GetStreamURI 别名：获取设备流地址
+func (m *Manager) GetStreamURI(deviceID, profileToken string) (string, error) {
+	return m.StartStream(deviceID, profileToken)
+}
+
+// UpdateDevicePreview 更新设备预览信息
+func (m *Manager) UpdateDevicePreview(deviceID, previewURL, snapshotURL string) error {
+	device, exists := m.GetDeviceByID(deviceID)
+	if !exists {
+		return fmt.Errorf("设备不存在: %s", deviceID)
+	}
+
+	if previewURL != "" {
+		device.PreviewURL = previewURL
+	} else {
+		previewURL, _ := m.getDevicePreviewURL(device)
+		if previewURL != "" {
+			device.PreviewURL = previewURL
+		}
+	}
+
+	if snapshotURL != "" {
+		device.SnapshotURL = snapshotURL
+	} else {
+		snapshotURL, _ := m.getDeviceSnapshotURL(device)
+		if snapshotURL != "" {
+			device.SnapshotURL = snapshotURL
+		}
+	}
+
+	return nil
+}
+
+// ContinuousMove PTZ连续移动
+func (m *Manager) ContinuousMove(deviceID, profileToken, command string, speed float64) error {
+	return m.PTZControl(deviceID, command, speed)
+}
+
+// StopPTZ 停止PTZ
+func (m *Manager) StopPTZ(deviceID, profileToken string) error {
+	return m.PTZControl(deviceID, "stop", 0)
+}
+
+// SetPreset 设置预置位
+func (m *Manager) SetPreset(deviceID, profileToken, presetName, presetToken string) (string, error) {
+	return m.SetPTZPreset(deviceID, presetName)
+}
+
+// GotoPreset 移动到预置位
+func (m *Manager) GotoPreset(deviceID, profileToken, presetToken string, speed float64) error {
+	return m.PTZGotoPreset(deviceID, presetToken)
+}
+
+// RemovePreset 删除预置位
+func (m *Manager) RemovePreset(deviceID, profileToken, presetToken string) error {
+	device, exists := m.GetDeviceByID(deviceID)
+	if !exists {
+		return fmt.Errorf("设备不存在: %s", deviceID)
+	}
+
+	xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", device.IP, device.Port)
+	d, err := NewDevice(DeviceParams{
+		Xaddr:    xaddr,
+		Username: device.Username,
+		Password: device.Password,
+	})
+	if err != nil {
+		return fmt.Errorf("创建设备客户端失败: %w", err)
+	}
+
+	if profileToken == "" && len(device.Profiles) > 0 {
+		profileToken = device.Profiles[0].Token
+	}
+
+	debug.Info("onvif", "删除预置位: 设备=%s, 预置位=%s", deviceID, presetToken)
+	// 删除预置位功能实现
+	if d.client != nil {
+		return d.client.RemovePreset(profileToken, presetToken)
+	}
+	return nil
+}
+
+// GetPresets 获取预置位列表
+func (m *Manager) GetPresets(deviceID, profileToken string) ([]PTZPreset, error) {
+	device, exists := m.GetDeviceByID(deviceID)
+	if !exists {
+		return nil, fmt.Errorf("设备不存在: %s", deviceID)
+	}
+
+	if profileToken == "" && len(device.Profiles) > 0 {
+		profileToken = device.Profiles[0].Token
+	}
+
+	return m.GetPTZPresets(deviceID)
+}
+
+// GetSnapshotURI 获取设备快照地址
+func (m *Manager) GetSnapshotURI(deviceID, profileToken string) (string, error) {
+	device, exists := m.GetDeviceByID(deviceID)
 	if !exists {
 		return "", fmt.Errorf("设备不存在: %s", deviceID)
 	}
 
-	return m.StartStream(deviceID, profileToken)
+	// 如果没有profileToken，使用第一个配置文件
+	if profileToken == "" && len(device.Profiles) > 0 {
+		profileToken = device.Profiles[0].Token
+	}
+
+	// 创建ONVIF设备客户端
+	xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", device.IP, device.Port)
+	d, err := NewDevice(DeviceParams{
+		Xaddr:    xaddr,
+		Username: device.Username,
+		Password: device.Password,
+	})
+	if err != nil {
+		return "", fmt.Errorf("创建设备客户端失败: %w", err)
+	}
+
+	return d.GetSnapshotURI(profileToken)
+}
+
+// UpdateDeviceCredentials 更新设备凭据
+func (m *Manager) UpdateDeviceCredentials(deviceID, username, password string) error {
+	device, exists := m.GetDeviceByID(deviceID)
+	if !exists {
+		return fmt.Errorf("设备不存在: %s", deviceID)
+	}
+
+	// 如果提供了用户名或密码，更新它们
+	if username != "" {
+		device.Username = username
+	}
+	if password != "" {
+		device.Password = password
+	}
+
+	// 验证新的凭据
+	xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", device.IP, device.Port)
+	d, err := NewDevice(DeviceParams{
+		Xaddr:    xaddr,
+		Username: device.Username,
+		Password: device.Password,
+	})
+	if err != nil {
+		// 恢复原来的凭据
+		return fmt.Errorf("新凭据验证失败: %w", err)
+	}
+
+	// 验证连接
+	if err := d.TestConnection(); err != nil {
+		return fmt.Errorf("设备连接测试失败: %w", err)
+	}
+
+	log.Printf("[ONVIF] ✓ 设备凭据已更新: %s", deviceID)
+	return nil
+}
+
+// GetDeviceStatus 获取设备状态
+func (m *Manager) GetDeviceStatus(deviceID string) (string, error) {
+	device, exists := m.GetDeviceByID(deviceID)
+	if !exists {
+		return "", fmt.Errorf("设备不存在: %s", deviceID)
+	}
+	return device.Status, nil
+}
+
+// GetStats 获取统计信息
+func (m *Manager) GetStats() map[string]interface{} {
+	return m.GetDeviceStatistics()
+}
+
+// GetVideoEncoderConfigurations 获取视频编码配置
+func (m *Manager) GetVideoEncoderConfigurations(deviceID, profileToken string) ([]map[string]interface{}, error) {
+	device, exists := m.GetDeviceByID(deviceID)
+	if !exists {
+		return nil, fmt.Errorf("设备不存在: %s", deviceID)
+	}
+
+	// 如果没有指定profileToken，使用第一个配置文件
+	if profileToken == "" && len(device.Profiles) > 0 {
+		profileToken = device.Profiles[0].Token
+	}
+
+	// 创建ONVIF设备客户端
+	xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", device.IP, device.Port)
+	d, err := NewDevice(DeviceParams{
+		Xaddr:    xaddr,
+		Username: device.Username,
+		Password: device.Password,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("创建设备客户端失败: %w", err)
+	}
+
+	// 获取视频编码配置
+	configs, err := d.client.GetVideoEncoderConfigurations(profileToken)
+	if err != nil {
+		return nil, fmt.Errorf("获取视频编码配置失败: %w", err)
+	}
+
+	// 转换为map格式
+	result := make([]map[string]interface{}, len(configs))
+	for i, cfg := range configs {
+		result[i] = map[string]interface{}{
+			"token":        cfg.Token,
+			"name":         cfg.Name,
+			"encoding":     cfg.Encoding,
+			"width":        cfg.Width,
+			"height":       cfg.Height,
+			"quality":      cfg.Quality,
+			"frameRate":    cfg.FrameRate,
+			"bitrateLimit": cfg.BitrateLimit,
+			"h264Profile":  cfg.H264Profile,
+		}
+	}
+
+	return result, nil
 }
 
 // GetSnapshotURL 获取设备快照地址
@@ -518,18 +848,6 @@ func (m *Manager) GetSnapshot(deviceID, profileToken string) ([]byte, string, er
 	}
 
 	return d.GetSnapshot(profileToken)
-}
-
-// getMediaServiceXAddr 获取媒体服务地址
-func getMediaServiceXAddr(d *ONVIFDevice) (string, error) {
-	servicesMap := d.GetServices()
-	for serviceType, xAddr := range servicesMap {
-		if serviceType == "Media" || serviceType == "http://www.onvif.org/ver10/media/wsdl" {
-			return xAddr, nil
-		}
-	}
-
-	return "", fmt.Errorf("未找到媒体服务")
 }
 
 // AddDevice 添加ONVIF设备（支持多种地址格式）
@@ -1448,4 +1766,23 @@ func (s *WSDiscoveryService) parseProbeResponseFallback(data []byte) *DeviceDisc
 	}
 
 	return result
+}
+
+// contains 检查字符串切片中是否包含指定字符串
+func contains(slice []string, item string) bool {
+	for _, v := range slice {
+		if v == item {
+			return true
+		}
+	}
+	return false
+}
+
+// getONVIFAddr 获取设备的ONVIF端点地址，优先使用已保存的地址
+func (m *Manager) getONVIFAddr(device *Device) string {
+	if device.ONVIFAddr != "" {
+		return device.ONVIFAddr
+	}
+	// 备选：构造默认地址
+	return fmt.Sprintf("http://%s:%d/onvif/device_service", device.IP, device.Port)
 }

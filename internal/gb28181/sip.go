@@ -765,12 +765,17 @@ func (s *Server) handleRegisterUDP(remoteAddr *net.UDPAddr, message *SIPMessage)
 
 // handleMessageUDP 处理 UDP MESSAGE 请求
 func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) {
-	log.Printf("[UDP-MESSAGE] 收到消息请求来自: %s", remoteAddr)
-
 	// 从 From 头提取设备ID
 	fromHeader := message.Headers["From"]
 	deviceID := extractDeviceID(fromHeader)
-	log.Printf("[UDP-MESSAGE] 设备ID: %s", deviceID)
+
+	// 检查是否为心跳消息，心跳消息不输出详细日志
+	isKeepalive := len(message.Body) > 0 && strings.Contains(message.Body, "Keepalive")
+
+	if !isKeepalive {
+		log.Printf("[UDP-MESSAGE] 收到消息请求来自: %s", remoteAddr)
+		log.Printf("[UDP-MESSAGE] 设备ID: %s", deviceID)
+	}
 
 	// 发送200 OK响应
 	response := BuildSIPResponse(message, 200, "OK")
@@ -813,18 +818,21 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 		}
 	} // 解析消息体（可能是设备目录、状态等XML数据）
 	if len(message.Body) > 0 {
-		log.Printf("[UDP-MESSAGE] 消息体内容:\n%s", message.Body)
-		if strings.Contains(message.Body, "Catalog") && strings.Contains(message.Body, "Response") {
+		if strings.Contains(message.Body, "Keepalive") {
+			// 心跳消息，只记录简单日志，不打印消息体
+			if deviceID != "" {
+				s.UpdateKeepAlive(deviceID)
+				// 心跳日志仅在调试时显示
+			}
+		} else if strings.Contains(message.Body, "Catalog") && strings.Contains(message.Body, "Response") {
 			log.Printf("[UDP-MESSAGE] 收到设备目录响应")
 			s.parseCatalogResponse(deviceID, message.Body)
 		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
 			log.Printf("[UDP-MESSAGE] 收到设备信息响应")
 			s.parseDeviceInfoResponse(deviceID, message.Body)
-		} else if strings.Contains(message.Body, "Keepalive") {
-			if deviceID != "" {
-				s.UpdateKeepAlive(deviceID)
-				log.Printf("[UDP-MESSAGE] 收到设备 %s 心跳", deviceID)
-			}
+		} else {
+			// 其他消息类型，记录内容便于调试
+			log.Printf("[UDP-MESSAGE] 消息类型 (来自 %s):\n%s", deviceID, message.Body)
 		}
 	}
 }

@@ -159,8 +159,8 @@ func (s *Server) handleZLMAddStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 简单校验 URL 合法性
-	if !strings.HasPrefix(req.URL, "rtsp://") && !strings.HasPrefix(req.URL, "http://") {
-		respondBadRequest(w, "流地址必须以 rtsp:// 或 http:// 开头")
+	if !strings.HasPrefix(req.URL, "rtsp://") && !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "rtsps://") {
+		respondBadRequest(w, "流地址必须以 rtsp://, rtsps:// 或 http:// 开头")
 		return
 	}
 
@@ -170,8 +170,9 @@ func (s *Server) handleZLMAddStream(w http.ResponseWriter, r *http.Request) {
 	var res *preview.PreviewResult
 	var err error
 	if s.previewManager != nil {
-		res, err = s.previewManager.StartRTSPProxy(req.StreamID, req.URL, req.App, zlmHost, httpPort, rtmpPort)
+		res, err = s.previewManager.StartRTSPProxy(req.StreamID, req.URL, req.App, zlmHost, httpPort, rtmpPort, "", "")
 	} else {
+		// 添加流代理时启用TCP模式以支持长连接
 		_, err = s.zlmServer.GetAPIClient().AddStreamProxy(req.URL, req.App, req.StreamID)
 		if err == nil {
 			// 构造 PreviewResult 仅用于流地址返回

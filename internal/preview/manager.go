@@ -178,7 +178,7 @@ func (m *Manager) StopChannelPreview(deviceID, channelID string) error {
 }
 
 // StartRTSPProxy 为指定设备启动 RTSP -> ZLM 流代理（用于 ONVIF 等场景）
-func (m *Manager) StartRTSPProxy(deviceID, rtspURL, app, zlmHost string, httpPort, rtmpPort int) (*PreviewResult, error) {
+func (m *Manager) StartRTSPProxy(deviceID, rtspURL, app, zlmHost string, httpPort, rtmpPort int, rtspUser, rtspPassword string) (*PreviewResult, error) {
 	if m.zlm == nil || m.zlm.GetAPIClient() == nil {
 		return nil, fmt.Errorf("zlm 未配置")
 	}
@@ -204,8 +204,22 @@ func (m *Manager) StartRTSPProxy(deviceID, rtspURL, app, zlmHost string, httpPor
 		return res, nil
 	}
 
-	// 首先尝试默认（tcp rtp_type）方式添加代理
-	proxyInfo, err := zlmClient.AddStreamProxy(rtspURL, app, streamID)
+	// 如果传入了 rtsp 凭据，则在 options 中传给 ZLM（字段名使用 rtsp_user/rtsp_pwd）
+	var proxyInfo *zlm.StreamProxyInfo
+	var err error
+	if rtspUser != "" || rtspPassword != "" {
+		opts := map[string]interface{}{
+			"rtp_type":    0,
+			"timeout_sec": 15,
+			"retry_count": 3,
+			"rtsp_user":   rtspUser,
+			"rtsp_pwd":    rtspPassword,
+		}
+		proxyInfo, err = zlmClient.AddStreamProxyWithOptions(rtspURL, app, streamID, opts)
+	} else {
+		// 首先尝试默认（tcp rtp_type）方式添加代理
+		proxyInfo, err = zlmClient.AddStreamProxy(rtspURL, app, streamID)
+	}
 	if err != nil {
 		debug.Warn("preview", "AddStreamProxy default failed: %v, will try UDP fallback", err)
 		// 如果报 already exists，直接返回现有信息
@@ -240,6 +254,10 @@ func (m *Manager) StartRTSPProxy(deviceID, rtspURL, app, zlmHost string, httpPor
 
 		// 回退：尝试使用 UDP rtp_type 并增加 retry_count
 		opts := map[string]interface{}{"rtp_type": 1, "retry_count": 5, "timeout_sec": 30}
+		if rtspUser != "" || rtspPassword != "" {
+			opts["rtsp_user"] = rtspUser
+			opts["rtsp_pwd"] = rtspPassword
+		}
 		proxyInfo, err = zlmClient.AddStreamProxyWithOptions(rtspURL, app, streamID, opts)
 		if err != nil {
 			return nil, fmt.Errorf("添加流代理失败: %w", err)

@@ -7,7 +7,10 @@ GB28181:
     HeartbeatInterval: 60
     RegisterExpires: 3600
 ONVIF:
+    CheckInterval: 120
     DiscoveryInterval: 60
+    EnableCheck: true
+    MaxFailedCount: 3
     MediaPortRange: 8000-9000
 API:
     Host: 0.0.0.0
@@ -56,8 +59,8 @@ ZLM:
     General:
         EnableVhost: false
         FlowThreshold: 1024
-        MaxStreamWaitMS: 15000
-        StreamNoneReaderDelayMS: 0
+        MaxStreamWaitMS: 30000
+        StreamNoneReaderDelayMS: 30000
         MergeWriteMS: 0
         MediaServerId: zpip-server
         ListenIP: '0.0.0.0'

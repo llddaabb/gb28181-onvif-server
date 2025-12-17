@@ -56,8 +56,8 @@ ZLM:
     General:
         EnableVhost: false
         FlowThreshold: 1024
-        MaxStreamWaitMS: 15000
-        StreamNoneReaderDelayMS: 0
+        MaxStreamWaitMS: 30000
+        StreamNoneReaderDelayMS: 30000
         MergeWriteMS: 0
         MediaServerId: zpip-server
         ListenIP: '::'

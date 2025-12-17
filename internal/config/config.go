@@ -22,8 +22,11 @@ type GB28181Config struct {
 
 // ONVIFConfig ONVIF配置结构体
 type ONVIFConfig struct {
-	DiscoveryInterval int    `yaml:"DiscoveryInterval"`
 	MediaPortRange    string `yaml:"MediaPortRange"`
+	EnableCheck       bool   `yaml:"EnableCheck"`
+	CheckInterval     int    `yaml:"CheckInterval"`
+	DiscoveryInterval int    `yaml:"DiscoveryInterval"`
+	MaxFailureCount   int    `yaml:"MaxFailureCount"`
 }
 
 // APIConfig API配置结构体
@@ -315,8 +318,10 @@ func Load(filePath string) (*Config, error) {
 
 	if config.ONVIF == nil {
 		config.ONVIF = &ONVIFConfig{
-			DiscoveryInterval: 60,
-			MediaPortRange:    "8000-9000",
+			EnableCheck:     false,
+			CheckInterval:   60,
+			MaxFailureCount: 3,
+			MediaPortRange:  "8000-9000",
 		}
 	}
 
