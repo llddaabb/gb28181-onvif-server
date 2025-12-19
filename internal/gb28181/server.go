@@ -55,7 +55,8 @@ type Channel struct {
 	Manufacturer  string `json:"manufacturer"`
 	Model         string `json:"model"`
 	Status        string `json:"status"`
-	PTZType       int    `json:"ptzType"` // 0-未知, 1-球机, 2-半球, 3-固定枪机, 4-遥控枪机
+	PTZType       int    `json:"ptzType"`      // 0-未知, 1-球机, 2-半球, 3-固定枪机, 4-遥控枪机
+	PTZSupported  bool   `json:"ptzSupported"` // 是否支持PTZ (ptzType=1或4时为true)
 	Longitude     string `json:"longitude"`
 	Latitude      string `json:"latitude"`
 	StreamURL     string `json:"streamURL"`
@@ -106,14 +107,7 @@ func (s *Server) Start() error {
 		s.listener = listener
 	}
 
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("[GB28181] ✓ SIP服务器启动成功")
-	log.Printf("[GB28181] UDP监听地址: %s", addr)
-	if s.listener != nil {
-		log.Printf("[GB28181] TCP监听地址: %s", addr)
-	}
-	log.Printf("[GB28181] 配置 - Realm: %s | ServerID: %s | Port: %d", s.config.Realm, s.config.ServerID, s.config.SipPort)
-	log.Printf("═══════════════════════════════════════════════════════════")
+	log.Printf("[GB28181] ✓ SIP服务器启动成功 (UDP+TCP监听: %s)", addr)
 	debug.Info("gb28181", "服务器启动成功，监听地址: %s (UDP+TCP)", addr)
 	debug.Debug("gb28181", "配置信息: SIP IP=%s, SIP Port=%d, Realm=%s, ServerID=%s",
 		s.config.SipIP, s.config.SipPort, s.config.Realm, s.config.ServerID)
@@ -172,8 +166,7 @@ func (s *Server) handleUDPConnections() {
 			if n > 0 {
 				data := make([]byte, n)
 				copy(data, buffer[:n])
-				log.Printf("[GB28181] 收到UDP消息，来自: %s, 长度: %d字节", remoteAddr, n)
-				debug.Debug("gb28181", "UDP消息内容:\n%s", string(data))
+				debug.Debug("gb28181", "收到UDP消息，来自: %s, 长度: %d字节", remoteAddr, n)
 				go s.handleUDPMessage(data, remoteAddr)
 			}
 		}
@@ -192,7 +185,7 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 
 	// 如果是响应，进行响应处理
 	if message.IsResponse {
-		log.Printf("[SIP-UDP] 收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, remoteAddr)
+		debug.Debug("gb28181", "收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, remoteAddr)
 		// 对于响应，我们需要向设备发送 ACK（如果是 INVITE 的2xx响应）
 		// 使用UDP连接发送 ACK
 		remoteUDP := &net.UDPAddr{
@@ -204,8 +197,7 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 	}
 
 	// 根据消息类型进行处理
-	log.Printf("[SIP-UDP] 收到消息类型: %s 来自: %s", message.Type, remoteAddr)
-	debug.Info("gb28181", "UDP SIP消息: 类型=%s, 来自=%s", message.Type, remoteAddr)
+	debug.Debug("gb28181", "UDP SIP消息: 类型=%s, 来自=%s", message.Type, remoteAddr)
 
 	switch message.Type {
 	case "REGISTER":
@@ -215,7 +207,7 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 	case "INVITE":
 		s.handleInviteUDP(remoteAddr, message)
 	case "ACK":
-		log.Printf("[SIP-UDP] 收到ACK: %s", remoteAddr)
+		debug.Debug("gb28181", "收到ACK: %s", remoteAddr)
 	case "BYE":
 		s.handleByeUDP(remoteAddr, message)
 	case "OPTIONS":
@@ -225,7 +217,7 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 		if strings.HasPrefix(message.Type, "SIP/2.0") {
 			s.handleSIPResponseUDP(remoteAddr, message)
 		} else {
-			log.Printf("[WARN] 未知的SIP消息类型: %s", message.Type)
+			debug.Warn("gb28181", "未知的SIP消息类型: %s", message.Type)
 		}
 	}
 }
@@ -233,7 +225,6 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 // acceptConnections 处理客户端连接
 func (s *Server) acceptConnections() {
 	debug.Info("gb28181", "开始接受客户端连接")
-	log.Println("[GB28181] 等待客户端连接...")
 
 	for {
 		conn, err := s.listener.Accept()
@@ -250,7 +241,6 @@ func (s *Server) acceptConnections() {
 			}
 		}
 
-		log.Printf("[GB28181] ✓ 新连接来自: %s", conn.RemoteAddr())
 		debug.Info("gb28181", "新的客户端连接: %s", conn.RemoteAddr())
 		// 为每个连接创建一个会话处理协程
 		go s.handleConnection(conn)
@@ -261,8 +251,7 @@ func (s *Server) acceptConnections() {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	log.Printf("[GB28181] 处理来自 %s 的连接", conn.RemoteAddr())
-	debug.Info("gb28181", "处理连接: %s", conn.RemoteAddr())
+	debug.Debug("gb28181", "处理连接: %s", conn.RemoteAddr())
 
 	// 创建一个缓冲区来接收SIP消息
 	buffer := make([]byte, 4096)
@@ -274,10 +263,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 			select {
 			case <-s.stopChan:
 				debug.Info("gb28181", "连接处理停止: %s", conn.RemoteAddr())
-				log.Printf("[GB28181] 连接已关闭: %s", conn.RemoteAddr())
 				return
 			default:
-				log.Printf("[WARN] 读取数据失败 (%s): %v", conn.RemoteAddr(), err)
 				debug.Warn("gb28181", "读取连接数据失败: %s - %v", conn.RemoteAddr(), err)
 				return
 			}
@@ -317,7 +304,7 @@ func (s *Server) heartbeatChecker() {
 				}
 			}
 			if len(expiredDevices) > 0 {
-				log.Printf("[GB28181] 📵 移除已过期设备: %v", expiredDevices)
+				debug.Info("gb28181", "移除已过期设备: %v", expiredDevices)
 			}
 			s.devicesMux.Unlock()
 		case <-s.stopChan:
@@ -342,7 +329,7 @@ func (s *Server) RegisterDevice(deviceID, name, sipIP string, sipPort int, expir
 		existing.RegisterTime = now
 		existing.LastKeepAlive = now
 		existing.Expires = expires
-		log.Printf("[GB28181] 📱 设备重新注册: ID=%s | 地址=%s:%d | 有效期=%d秒", deviceID, sipIP, sipPort, expires)
+		debug.Info("gb28181", "设备重新注册: ID=%s | 地址=%s:%d | 有效期=%d秒", deviceID, sipIP, sipPort, expires)
 		return
 	}
 
@@ -361,7 +348,7 @@ func (s *Server) RegisterDevice(deviceID, name, sipIP string, sipPort int, expir
 	}
 
 	s.devices[deviceID] = device
-	log.Printf("[GB28181] 📱 设备注册: ID=%s | 地址=%s:%d | 有效期=%d秒", deviceID, sipIP, sipPort, expires)
+	log.Printf("[GB28181] ✓ 设备注册: %s (%s:%d)", deviceID, sipIP, sipPort)
 }
 
 // UpdateDeviceInfo 更新设备信息
@@ -373,7 +360,7 @@ func (s *Server) UpdateDeviceInfo(deviceID, manufacturer, model, firmware string
 		device.Manufacturer = manufacturer
 		device.Model = model
 		device.Firmware = firmware
-		log.Printf("[GB28181] 📝 设备信息更新: ID=%s | 厂商=%s | 型号=%s", deviceID, manufacturer, model)
+		debug.Debug("gb28181", "设备信息更新: ID=%s | 厂商=%s | 型号=%s", deviceID, manufacturer, model)
 	}
 }
 
@@ -404,6 +391,7 @@ func (s *Server) AddChannel(deviceID string, channel *Channel) {
 		existingChannel.Model = channel.Model
 		existingChannel.Status = channel.Status
 		existingChannel.PTZType = channel.PTZType
+		existingChannel.PTZSupported = channel.PTZType == 1 || channel.PTZType == 4
 		existingChannel.Longitude = channel.Longitude
 		existingChannel.Latitude = channel.Latitude
 		log.Printf("[GB28181] 📺 通道更新: 设备=%s | 通道=%s | 名称=%s", deviceID, channel.ChannelID, channel.Name)
@@ -412,6 +400,8 @@ func (s *Server) AddChannel(deviceID string, channel *Channel) {
 
 	// 新通道，设置创建时间
 	channel.CreateTime = time.Now().Unix()
+	// 设置通道的 PTZSupported: 1-球机, 4-遥控枪机 支持PTZ
+	channel.PTZSupported = channel.PTZType == 1 || channel.PTZType == 4
 
 	// 添加到通道映射
 	s.channels[channel.ChannelID] = channel
@@ -423,11 +413,11 @@ func (s *Server) AddChannel(deviceID string, channel *Channel) {
 		if channel.Status == "ON" || channel.Status == "online" {
 			device.OnlineChannels++
 		}
-		// 检查 PTZ 支持
-		if channel.PTZType > 0 && channel.PTZType <= 2 {
+		// 设备有任何支持PTZ的通道则设备支持PTZ
+		if channel.PTZSupported {
 			device.PTZSupported = true
 		}
-		log.Printf("[GB28181] 📺 通道添加: 设备=%s | 通道=%s | 名称=%s", deviceID, channel.ChannelID, channel.Name)
+		log.Printf("[GB28181] 📺 通道添加: 设备=%s | 通道=%s | 名称=%s | PTZType=%d | PTZSupported=%v", deviceID, channel.ChannelID, channel.Name, channel.PTZType, channel.PTZSupported)
 	}
 
 	// 同步到API服务器的通道管理器

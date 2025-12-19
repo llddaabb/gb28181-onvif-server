@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/xml"
 	"fmt"
-	"log"
 	"net"
 	"regexp"
 	"strconv"
@@ -221,73 +220,59 @@ type DeviceParams struct {
 	Timeout  time.Duration
 }
 
-// ONVIFDeviceClient 封装的ONVIF设备客户端
+// ONVIFDeviceClient 封装的ONVIF设备客户端（使用纯SOAP实现）
 type ONVIFDeviceClient struct {
-	client *ONVIFDevice
+	client *SOAPClient
 	xaddr  string
 }
 
-// NewDevice 创建设备实例
+// NewDevice 创建设备实例（纯SOAP实现）
 func NewDevice(params DeviceParams) (*ONVIFDeviceClient, error) {
-	client := NewONVIFDevice(params.Username, params.Password)
-	if err := client.Connect(params.Xaddr); err != nil {
-		return nil, err
-	}
+	// 规范化地址
+	endpoint := normalizeXAddr(params.Xaddr)
+
+	// 创建SOAP客户端
+	client := NewSOAPClient(endpoint, params.Username, params.Password)
+
+	// 测试连接（宽松处理）：某些设备在设备服务上会返回 401/403/503
+	// 这里不再硬失败，允许后续通过 GetCapabilities/Media 服务继续工作
+	_ = client.TestConnection()
 
 	return &ONVIFDeviceClient{
-		client: client.(*ONVIFDevice),
-		xaddr:  params.Xaddr,
+		client: client,
+		xaddr:  endpoint,
 	}, nil
 }
 
 // TestConnection 测试设备连接
 func (d *ONVIFDeviceClient) TestConnection() error {
 	if d.client == nil {
-		return fmt.Errorf("device client is nil")
+		return fmt.Errorf("设备客户端为nil")
 	}
-	_, err := d.client.GetSystemDateAndTime()
-	return err
+	return d.client.TestConnection()
 }
 
-// GetServices 获取服务列表
+// GetServices 获取服务列表（纯SOAP实现已集成服务地址）
 func (d *ONVIFDeviceClient) GetServices() map[string]string {
 	services := make(map[string]string)
-	if d.client != nil && d.client.sdkDevice != nil {
-		// 从 goonvif Device 获取真实的服务端点
-		endpoints := d.client.sdkDevice.GetServices()
-		if len(endpoints) > 0 {
-			log.Printf("[ONVIF] 📡 从 goonvif 获取的服务端点:")
-			for serviceName, serviceAddr := range endpoints {
-				log.Printf("[ONVIF]   - %s: %s", serviceName, serviceAddr)
-				services[serviceName] = serviceAddr
-			}
-		} else {
-			log.Printf("[ONVIF] ⚠️  goonvif 未返回任何服务端点")
+	if d.client != nil {
+		// 在GetCapabilities中会自动发现服务地址
+		if d.client.mediaAddr != "" {
+			services["Media"] = d.client.mediaAddr
 		}
-	} else {
-		log.Printf("[ONVIF] ⚠️  设备客户端未初始化")
+		if d.client.ptzAddr != "" {
+			services["PTZ"] = d.client.ptzAddr
+		}
 	}
 	return services
 }
 
 // GetDeviceInfo 获取设备信息
 func (d *ONVIFDeviceClient) GetDeviceInfo() (map[string]string, error) {
-	info := make(map[string]string)
 	if d.client == nil {
-		return info, fmt.Errorf("device client is nil")
+		return nil, fmt.Errorf("设备客户端为nil")
 	}
-
-	devInfo, err := d.client.GetDeviceInformation()
-	if err != nil {
-		return info, err
-	}
-
-	info["Manufacturer"] = devInfo.Manufacturer
-	info["Model"] = devInfo.Model
-	info["FirmwareVersion"] = devInfo.FirmwareVersion
-	info["SerialNumber"] = devInfo.SerialNumber
-	info["HardwareId"] = devInfo.HardwareID
-	return info, nil
+	return d.client.GetDeviceInformation()
 }
 
 // GetCapabilities 获取设备能力
@@ -295,36 +280,30 @@ func (d *ONVIFDeviceClient) GetCapabilities() *DeviceCapabilities {
 	if d.client == nil {
 		return nil
 	}
-	caps, err := d.client.GetCapabilities()
+	_, err := d.client.GetCapabilities()
 	if err != nil {
 		return nil
 	}
 
-	// 检查PTZ支持
-	hasPTZ := false
-	if caps != nil && caps.PTZ != nil {
-		hasPTZ = caps.PTZ != nil
-	}
-
 	return &DeviceCapabilities{
-		HasPTZ: hasPTZ,
-		Media:  caps.Media,
-		PTZ:    caps.PTZ,
+		HasPTZ: d.client.ptzAddr != "",
+		Media:  nil,
+		PTZ:    nil,
 	}
 }
 
 // GetMediaProfiles 获取媒体配置文件
 func (d *ONVIFDeviceClient) GetMediaProfiles() ([]MediaProfile, error) {
 	if d.client == nil {
-		return nil, fmt.Errorf("device client is nil")
+		return nil, fmt.Errorf("设备客户端为nil")
 	}
-	return d.client.GetProfiles()
+	return d.client.GetMediaProfiles()
 }
 
 // GetStreamURI 获取流地址
 func (d *ONVIFDeviceClient) GetStreamURI(profileToken string) (string, error) {
 	if d.client == nil {
-		return "", fmt.Errorf("device client is nil")
+		return "", fmt.Errorf("设备客户端为nil")
 	}
 	return d.client.GetStreamURI(profileToken)
 }
@@ -332,7 +311,7 @@ func (d *ONVIFDeviceClient) GetStreamURI(profileToken string) (string, error) {
 // GetSnapshotURI 获取快照地址
 func (d *ONVIFDeviceClient) GetSnapshotURI(profileToken string) (string, error) {
 	if d.client == nil {
-		return "", fmt.Errorf("device client is nil")
+		return "", fmt.Errorf("设备客户端为nil")
 	}
 	return d.client.GetSnapshotURI(profileToken)
 }
@@ -348,42 +327,41 @@ func (d *ONVIFDeviceClient) GetSnapshot(profileToken string) ([]byte, string, er
 }
 
 // PTZContinuousMove PTZ连续移动
-func (d *ONVIFDeviceClient) PTZContinuousMove(profileToken string, velocity *PTZVector, timeout float64) error {
+func (d *ONVIFDeviceClient) PTZContinuousMove(profileToken string, x, y, z float64, timeout float64) error {
 	if d.client == nil {
-		return fmt.Errorf("device client is nil")
+		return fmt.Errorf("设备客户端为nil")
 	}
-	return d.client.ContinuousMove(profileToken, velocity)
+	return d.client.ContinuousMove(profileToken, x, y, z, timeout)
 }
 
 // PTZStop PTZ停止
-func (d *ONVIFDeviceClient) PTZStop(profileToken string, panTilt, zoom bool) error {
+func (d *ONVIFDeviceClient) PTZStop(profileToken string) error {
 	if d.client == nil {
-		return fmt.Errorf("device client is nil")
+		return fmt.Errorf("设备客户端为nil")
 	}
-	return d.client.Stop(profileToken)
+	return d.client.StopPTZ(profileToken)
 }
 
-// GotoHomePosition 移动到主页位置
-func (d *ONVIFDeviceClient) GotoHomePosition(profileToken string, speed *PTZVector) error {
+// GotoHomePosition 移动到主页位置（使用预置位1）
+func (d *ONVIFDeviceClient) GotoHomePosition(profileToken string) error {
 	if d.client == nil {
-		return fmt.Errorf("device client is nil")
+		return fmt.Errorf("设备客户端为nil")
 	}
-	// 使用预置位1作为主页
-	return d.client.GotoPreset(profileToken, "1", speed)
+	return d.client.GotoPreset(profileToken, "1")
 }
 
 // GotoPreset 移动到预置位
-func (d *ONVIFDeviceClient) GotoPreset(profileToken, presetToken string, speed *PTZVector) error {
+func (d *ONVIFDeviceClient) GotoPreset(profileToken, presetToken string) error {
 	if d.client == nil {
-		return fmt.Errorf("device client is nil")
+		return fmt.Errorf("设备客户端为nil")
 	}
-	return d.client.GotoPreset(profileToken, presetToken, speed)
+	return d.client.GotoPreset(profileToken, presetToken)
 }
 
 // GetPTZPresets 获取预置位列表
 func (d *ONVIFDeviceClient) GetPTZPresets(profileToken string) ([]PTZPreset, error) {
 	if d.client == nil {
-		return nil, fmt.Errorf("device client is nil")
+		return nil, fmt.Errorf("设备客户端为nil")
 	}
 	return d.client.GetPresets(profileToken)
 }
@@ -391,7 +369,7 @@ func (d *ONVIFDeviceClient) GetPTZPresets(profileToken string) ([]PTZPreset, err
 // SetPreset 设置预置位
 func (d *ONVIFDeviceClient) SetPreset(profileToken, presetName, presetToken string) (string, error) {
 	if d.client == nil {
-		return "", fmt.Errorf("device client is nil")
+		return "", fmt.Errorf("设备客户端为nil")
 	}
 	return d.client.SetPreset(profileToken, presetName, presetToken)
 }
@@ -399,7 +377,7 @@ func (d *ONVIFDeviceClient) SetPreset(profileToken, presetName, presetToken stri
 // GetSystemDateAndTime 获取系统时间
 func (d *ONVIFDeviceClient) GetSystemDateAndTime() (interface{}, error) {
 	if d.client == nil {
-		return nil, fmt.Errorf("device client is nil")
+		return nil, fmt.Errorf("设备客户端为nil")
 	}
 	return d.client.GetSystemDateAndTime()
 }
@@ -407,7 +385,7 @@ func (d *ONVIFDeviceClient) GetSystemDateAndTime() (interface{}, error) {
 // RemovePreset 删除预置位
 func (d *ONVIFDeviceClient) RemovePreset(profileToken, presetToken string) error {
 	if d.client == nil {
-		return fmt.Errorf("device client is nil")
+		return fmt.Errorf("设备客户端为nil")
 	}
 	return d.client.RemovePreset(profileToken, presetToken)
 }

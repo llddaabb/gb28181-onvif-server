@@ -214,7 +214,15 @@
     >
       <div class="preview-container">
         <div class="video-player-wrapper">
-          <PreviewPlayer ref="previewPlayerRef" :show="previewDialogVisible" :device="{ deviceId: selectedChannel?.deviceId }" :channels="[{ channelId: selectedChannel?.channelId }]" :selectedChannelId="selectedChannel?.channelId || ''" />
+          <PreviewPlayer 
+            ref="previewPlayerRef" 
+            :show="previewDialogVisible" 
+            :device="{ deviceId: selectedChannel?.deviceId }" 
+            :channels="[{ channelId: selectedChannel?.channelId }]" 
+            :selectedChannelId="selectedChannel?.channelId || ''" 
+            :deviceType="selectedChannel?.deviceType || 'gb28181'"
+            :profileToken="selectedChannel?.profileToken || ''"
+          />
         </div>
 
         <div class="preview-controls">

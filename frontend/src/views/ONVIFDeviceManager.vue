@@ -56,27 +56,10 @@
           </span>
           <div class="button-group">
             <el-button 
-              type="success" 
-              @click="discoverDevices"
-              :loading="discoverLoading"
-              size="default">
-              🔍 自动发现
-            </el-button>
-            <el-button 
               type="primary" 
               @click="showAddModal = true"
               size="default">
               ➕ 手动添加
-            </el-button>
-            <el-button 
-              @click="showBatchModal = true"
-              size="default">
-              📤 批量导入
-            </el-button>
-            <el-button 
-              @click="exportDevices"
-              size="default">
-              📥 导出配置
             </el-button>
             <el-button 
               @click="refreshDevices"
@@ -173,9 +156,17 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="360" fixed="right">
+        <el-table-column label="操作" width="450" fixed="right">
           <template #default="{ row }">
             <el-button-group>
+              <el-tooltip content="添加通道" placement="top">
+                <el-button 
+                  type="success" 
+                  size="small"
+                  @click.stop="showAddChannelDialog(row)">
+                  ➕
+                </el-button>
+              </el-tooltip>
               <el-tooltip content="预览流地址" placement="top">
                 <el-button 
                   type="success" 
@@ -296,54 +287,7 @@
       </template>
     </el-dialog>
 
-    <!-- 批量导入对话框 -->
-    <el-dialog 
-      v-model="showBatchModal" 
-      title="批量导入ONVIF设备"
-      width="600px"
-      @close="resetBatchForm">
-      <el-form label-width="120px">
-        <el-form-item label="导入方式">
-          <el-radio-group v-model="batchForm.method">
-            <el-radio label="json">JSON格式</el-radio>
-            <el-radio label="csv">CSV格式</el-radio>
-          </el-radio-group>
-        </el-form-item>
 
-        <el-form-item label="设备数据" v-if="batchForm.method === 'json'">
-          <el-input 
-            v-model="batchForm.jsonData" 
-            type="textarea"
-            :rows="10"
-            placeholder='[{"ip":"192.168.1.100","port":8080,"username":"admin","password":"admin123","name":"Camera1"}]'></el-input>
-        </el-form-item>
-
-        <el-form-item label="CSV文件" v-if="batchForm.method === 'csv'">
-          <el-input 
-            v-model="batchForm.csvData" 
-            type="textarea"
-            :rows="10"
-            placeholder='ip,port,username,password,name
-192.168.1.100,8080,admin,admin123,Camera1
-192.168.1.101,8080,admin,admin123,Camera2'></el-input>
-        </el-form-item>
-
-        <el-alert 
-          v-if="batchForm.method === 'csv'"
-          title="CSV格式说明"
-          type="info"
-          description="第一行为表头，后续行为设备信息，字段顺序: ip,port,username,password,name"
-          show-icon
-          closable></el-alert>
-      </el-form>
-
-      <template #footer>
-        <el-button @click="showBatchModal = false">取消</el-button>
-        <el-button type="primary" @click="batchAddDevices" :loading="batchLoading">
-          导入设备
-        </el-button>
-      </template>
-    </el-dialog>
 
     <!-- 更新IP对话框 -->
     <el-dialog 
@@ -386,6 +330,8 @@
       v-model="previewData.showDialog" 
       :title="`设备预览 - ${previewData.device?.name}`"
       width="900px"
+      draggable
+      :modal="false"
       @close="stopPreview"
       @open="onPreviewDialogOpen">
       <div class="preview-container">
@@ -416,7 +362,17 @@
 
         <!-- 视频播放区域 (使用 PreviewPlayer) -->
         <div class="video-player-wrapper">
-          <PreviewPlayer ref="previewPlayerRef" :show="previewData.showDialog" :device="previewData.device ? { deviceId: previewData.device.deviceId || previewData.device.id } : null" :channels="previewData.streamInfo ? [{ channelId: previewData.streamInfo.stream_key || previewData.streamInfo.channel_id }] : []" :selectedChannelId="previewData.streamInfo ? (previewData.streamInfo.stream_key || previewData.streamInfo.channel_id) : ''" />
+          <PreviewPlayer 
+            ref="previewPlayerRef" 
+            :show="previewData.showDialog" 
+            :device="previewData.device ? { deviceId: previewData.device.deviceId || previewData.device.id } : null" 
+            :channels="previewData.streamInfo ? [{ channelId: previewData.streamInfo.stream_key || previewData.streamInfo.channel_id }] : []" 
+            :selectedChannelId="previewData.streamInfo ? (previewData.streamInfo.stream_key || previewData.streamInfo.channel_id) : ''"
+            :showPtz="previewData.device?.ptzSupported === true"
+            :ptzDeviceId="previewData.device?.deviceId || previewData.device?.id"
+            :profileToken="previewData.selectedProfile || 'PROFILE_000'"
+            deviceType="onvif"
+          />
         </div>
 
         <!-- 播放信息 显示由 PreviewPlayer 组件处理 -->
@@ -451,7 +407,7 @@
     <el-dialog 
       v-model="profilesData.showDialog" 
       :title="`媒体配置 - ${profilesData.device?.name}`"
-      width="700px">
+      width="900px">
       <el-table :data="profilesData.profiles" v-loading="profilesData.loading" stripe>
         <el-table-column prop="name" label="配置名称" width="120"></el-table-column>
         <el-table-column prop="token" label="Token" width="120"></el-table-column>
@@ -470,6 +426,50 @@
 
       <template #footer>
         <el-button @click="profilesData.showDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 添加通道选择对话框 -->
+    <el-dialog 
+      v-model="addChannelData.showDialog" 
+      :title="`添加通道 - ${addChannelData.device?.name}`"
+      width="800px">
+      <el-alert 
+        type="info" 
+        :closable="false"
+        style="margin-bottom: 16px;">
+        <template #title>
+          选择要添加到通道管理的Profile配置
+        </template>
+      </el-alert>
+      
+      <el-table 
+        :data="addChannelData.profiles" 
+        v-loading="addChannelData.loading"
+        @selection-change="handleChannelSelectionChange"
+        stripe>
+        <el-table-column type="selection" width="55"></el-table-column>
+        <el-table-column prop="name" label="配置名称" width="120"></el-table-column>
+        <el-table-column prop="token" label="Token" width="120"></el-table-column>
+        <el-table-column prop="encoding" label="编码" width="80"></el-table-column>
+        <el-table-column prop="resolution" label="分辨率" width="120"></el-table-column>
+        <el-table-column prop="fps" label="帧率" width="70"></el-table-column>
+        <el-table-column prop="bitrate" label="码率" width="100">
+          <template #default="{ row }">
+            {{ row.bitrate }} kbps
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <template #footer>
+        <el-button @click="addChannelData.showDialog = false">取消</el-button>
+        <el-button 
+          type="primary" 
+          @click="confirmAddChannels"
+          :disabled="addChannelData.selectedProfiles.length === 0"
+          :loading="addChannelData.adding">
+          添加选中通道 ({{ addChannelData.selectedProfiles.length }})
+        </el-button>
       </template>
     </el-dialog>
 
@@ -516,63 +516,7 @@
       </template>
     </el-dialog>
 
-    <!-- 发现设备对话框 -->
-    <el-dialog 
-      v-model="showDiscoverModal" 
-      title="发现的ONVIF设备"
-      width="900px"
-      destroy-on-close>
-      <div class="discover-hint" v-if="discoveredDevices.length > 0">
-        <el-alert type="info" :closable="false">
-          发现 {{ discoveredDevices.length }} 个设备，请选择要添加的设备并填写认证信息
-        </el-alert>
-      </div>
-      
-      <el-table 
-        :data="discoveredDevices" 
-        stripe 
-        style="width: 100%; margin-top: 15px;"
-        max-height="400px">
-        <el-table-column width="50">
-          <template #default="{ row }">
-            <el-checkbox v-model="row.selected" />
-          </template>
-        </el-table-column>
-        <el-table-column label="设备名称" width="150">
-          <template #default="{ row }">
-            {{ row.name || '未知设备' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="地址" width="200">
-          <template #default="{ row }">
-            <span class="discover-addr">{{ parseXAddr(row.xaddr).ip }}:{{ parseXAddr(row.xaddr).port }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="制造商" prop="manufacturer" width="100"></el-table-column>
-        <el-table-column label="型号" prop="model" width="100"></el-table-column>
-        <el-table-column label="用户名" width="120">
-          <template #default="{ row }">
-            <el-input v-model="row.username" size="small" placeholder="admin" />
-          </template>
-        </el-table-column>
-        <el-table-column label="密码" width="120">
-          <template #default="{ row }">
-            <el-input v-model="row.password" size="small" type="password" placeholder="密码" show-password />
-          </template>
-        </el-table-column>
-      </el-table>
 
-      <template #footer>
-        <div class="discover-footer">
-          <el-button @click="discoveredDevices.forEach(d => d.selected = true)">全选</el-button>
-          <el-button @click="discoveredDevices.forEach(d => d.selected = false)">取消全选</el-button>
-          <el-button type="primary" @click="addDiscoveredDevices" :loading="discoverAddLoading">
-            添加选中设备 ({{ discoveredDevices.filter(d => d.selected).length }})
-          </el-button>
-          <el-button @click="showDiscoverModal = false">关闭</el-button>
-        </div>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -625,7 +569,6 @@ interface MediaProfile {
 
 const devices = ref<Device[]>([])
 const loading = ref(false)
-const discoverLoading = ref(false)
 const searchText = ref('')
 const statusFilter = ref('')
 
@@ -677,7 +620,9 @@ const previewData = reactive({
   credentials: {
     username: '',
     password: ''
-  }
+  },
+  // 当前使用的 profile token (用于 PTZ 控制)
+  selectedProfile: 'PROFILE_000'
 })
 
 // Preview player ref
@@ -689,6 +634,16 @@ const profilesData = reactive({
   device: null as Device | null,
   profiles: [] as MediaProfile[],
   loading: false
+})
+
+// 添加通道数据
+const addChannelData = reactive({
+  showDialog: false,
+  device: null as Device | null,
+  profiles: [] as MediaProfile[],
+  selectedProfiles: [] as MediaProfile[],
+  loading: false,
+  adding: false
 })
 
 // 编辑凭证数据
@@ -731,14 +686,7 @@ const addFormRules = {
   password: [{ required: true, message: '密码必填', trigger: 'change' }]
 }
 
-// 批量导入表单
-const showBatchModal = ref(false)
-const batchLoading = ref(false)
-const batchForm = reactive({
-  method: 'json',
-  jsonData: '',
-  csvData: ''
-})
+
 
 // 更新IP表单
 const showUpdateIPModal = ref(false)
@@ -750,24 +698,7 @@ const updateIPForm = reactive({
   newPort: 8080
 })
 
-// 发现设备对话框
-interface DiscoveredDevice {
-  xaddr: string
-  types: string[]
-  manufacturer: string
-  model: string
-  name: string
-  location: string
-  hardware: string
-  sourceIP: string
-  selected?: boolean
-  username?: string
-  password?: string
-}
 
-const showDiscoverModal = ref(false)
-const discoveredDevices = ref<DiscoveredDevice[]>([])
-const discoverAddLoading = ref(false)
 
 // 自动刷新定时器
 let refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -787,108 +718,7 @@ const refreshDevices = async () => {
   }
 }
 
-// 自动发现设备
-const discoverDevices = async () => {
-  discoverLoading.value = true
-  try {
-    const response = await fetch('/api/onvif/discover', { method: 'POST' })
-    if (!response.ok) throw new Error('设备发现失败')
-    const data = await response.json()
-    
-    if (data.devices && data.devices.length > 0) {
-      // 显示发现的设备列表
-      discoveredDevices.value = data.devices.map((d: any) => ({
-        ...d,
-        selected: true,
-        username: 'admin',
-        password: ''
-      }))
-      showDiscoverModal.value = true
-      ElMessage.success(`发现 ${data.devices.length} 个ONVIF设备`)
-    } else {
-      ElMessage.warning('未发现任何ONVIF设备')
-    }
-  } catch (error) {
-    ElMessage.error(`发现失败: ${error}`)
-  } finally {
-    discoverLoading.value = false
-  }
-}
 
-// 添加发现的设备
-const addDiscoveredDevices = async () => {
-  const selectedDevices = discoveredDevices.value.filter(d => d.selected)
-  if (selectedDevices.length === 0) {
-    ElMessage.warning('请选择要添加的设备')
-    return
-  }
-
-  discoverAddLoading.value = true
-  let successCount = 0
-  let failCount = 0
-
-  for (const device of selectedDevices) {
-    try {
-      const response = await fetch('/api/onvif/devices', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          xaddr: device.xaddr,
-          username: device.username || 'admin',
-          password: device.password || ''
-        })
-      })
-      
-      if (response.ok) {
-        successCount++
-      } else {
-        failCount++
-      }
-    } catch {
-      failCount++
-    }
-  }
-
-  discoverAddLoading.value = false
-  showDiscoverModal.value = false
-  
-  if (successCount > 0) {
-    ElMessage.success(`成功添加 ${successCount} 个设备${failCount > 0 ? `，失败 ${failCount} 个` : ''}`)
-    refreshDevices()
-  } else {
-    ElMessage.error('添加设备失败')
-  }
-}
-
-// 从 XADDR 解析 IP 和端口
-const parseXAddr = (xaddr: string) => {
-  try {
-    const url = new URL(xaddr)
-    return { ip: url.hostname, port: url.port || '80' }
-  } catch {
-    return { ip: xaddr, port: '80' }
-  }
-}
-
-// 导出设备配置
-const exportDevices = () => {
-  const exportData = devices.value.map(d => ({
-    ip: d.ip,
-    port: d.port,
-    username: d.username,
-    password: d.password,
-    name: d.name
-  }))
-  
-  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `onvif_devices_${new Date().toISOString().slice(0, 10)}.json`
-  a.click()
-  URL.revokeObjectURL(url)
-  ElMessage.success('设备配置已导出')
-}
 
 // 添加设备
 const addDevice = async () => {
@@ -933,52 +763,7 @@ const addDevice = async () => {
   }
 }
 
-// 批量添加设备
-const batchAddDevices = async () => {
-  batchLoading.value = true
-  try {
-    let devices_list = []
 
-    if (batchForm.method === 'json') {
-      devices_list = JSON.parse(batchForm.jsonData)
-    } else {
-      // 解析CSV格式
-      const lines = batchForm.csvData.trim().split('\n')
-      const headers = lines[0].split(',').map(h => h.trim())
-      
-      for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(',').map(v => v.trim())
-        const device: any = {}
-        headers.forEach((header, index) => {
-          if (header === 'port') {
-            device[header] = parseInt(values[index])
-          } else {
-            device[header] = values[index]
-          }
-        })
-        devices_list.push(device)
-      }
-    }
-
-    const response = await fetch('/api/onvif/batch-add', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ devices: devices_list })
-    })
-
-    if (!response.ok) throw new Error('批量添加失败')
-    const data = await response.json()
-    
-    ElMessage.success(`成功添加 ${data.summary.added} 个设备，失败 ${data.summary.failed} 个`)
-    showBatchModal.value = false
-    resetBatchForm()
-    refreshDevices()
-  } catch (error) {
-    ElMessage.error(`批量添加失败: ${error}`)
-  } finally {
-    batchLoading.value = false
-  }
-}
 
 // 显示更新IP对话框
 const showUpdateIPModal_func = (row: Device) => {
@@ -1020,20 +805,24 @@ const updateDeviceIP = async () => {
   }
 }
 
-// 显示设备预览
-const showPreview = (row: Device) => {
-  if (!row.previewURL) {
-    ElMessage.warning('该设备没有预览地址')
-    return
-  }
-  
+// 显示设备预览（自动启动播放）
+const showPreview = async (row: Device) => {
+  console.log('[ONVIFDeviceManager] showPreview - row:', row, 'ptzSupported:', row.ptzSupported)
   previewData.device = row
   previewData.error = ''
   previewData.streamInfo = null
   // 初始化凭证 - 使用设备保存的凭证或默认值
   previewData.credentials.username = row.username || 'admin'
-  previewData.credentials.password = row.password || ''
+  previewData.credentials.password = row.password || 'a123456'
+  // 初始化 profile token - 默认使用 PROFILE_000
+  previewData.selectedProfile = 'PROFILE_000'
   previewData.showDialog = true
+  
+  console.log('[ONVIFDeviceManager] previewData.device.ptzSupported:', previewData.device?.ptzSupported)
+  
+  // 自动启动预览
+  await nextTick()
+  startPreviewWithCredentials()
 }
 
 // 表格行点击处理（兼容模板绑定）
@@ -1055,10 +844,8 @@ const getStatusText = (status: string | undefined) => {
 
 // 由 PreviewPlayer 组件处理播放逻辑与错误
 const onPreviewDialogOpen = () => {
-  // 打开对话框时只展示凭证输入，等待用户点击“开始预览”
+  // 对话框打开时重置错误状态（预览已在 showPreview 中自动启动）
   previewData.error = ''
-  previewData.streamInfo = null
-  previewData.loading = false
 }
 
 // 在进行关键操作前，统一验证设备凭证并在验证成功后同步通道到通道管理
@@ -1084,44 +871,113 @@ const ensureDeviceAuth = async (device: Device) => {
   }
 }
 
-// 在用户输入凭据后启动预览（调用后端并通知 PreviewPlayer）
+// 在用户输入凭据后启动预览（带重试和错误诊断）
 const startPreviewWithCredentials = async () => {
   if (!previewData.device) return
-  // 先进行认证并同步通道
-  const authOk = await ensureDeviceAuth(previewData.device)
-  if (!authOk) return
+  
   previewData.loading = true
   previewData.error = ''
-  try {
-    const response = await fetch(`/api/onvif/devices/${previewData.device.deviceId}/preview/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: previewData.credentials.username || previewData.device.username || '', password: previewData.credentials.password || previewData.device.password || '' })
-    })
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}))
-      throw new Error(errData.error || '启动预览失败')
-    }
-    const data = await response.json()
-    if (!data.success) throw new Error(data.error || '启动预览失败')
-    previewData.streamInfo = data.data
-    await nextTick()
-    // 通知 PreviewPlayer 使用已有的 streamInfo 播放
-    if (previewPlayerRef.value && previewData.streamInfo) {
-      const p = (typeof previewPlayerRef.value.startWithStreamInfo === 'function') ? previewPlayerRef.value : (previewPlayerRef.value.value && typeof previewPlayerRef.value.value.startWithStreamInfo === 'function') ? previewPlayerRef.value.value : (previewPlayerRef.value.$ && previewPlayerRef.value.$.exposed && typeof previewPlayerRef.value.$.exposed.startWithStreamInfo === 'function') ? previewPlayerRef.value.$.exposed : null
-      if (p) {
-        await p.startWithStreamInfo(previewData.streamInfo)
-      } else {
-        try { if (typeof previewPlayerRef.value.startPreview === 'function') await previewPlayerRef.value.startPreview() } catch (_) {}
+  const maxRetries = 2
+  let lastError = ''
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[尝试 ${attempt}/${maxRetries}] 启动ONVIF设备预览 (Profile: ${previewData.selectedProfile})`)
+      
+      const response = await fetch(`/api/onvif/devices/${previewData.device.deviceId}/preview/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          profileToken: previewData.selectedProfile || 'PROFILE_000',
+          username: previewData.credentials.username || previewData.device.username || '',
+          password: previewData.credentials.password || previewData.device.password || ''
+        })
+      })
+      
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}))
+        throw new Error(errData.error || `HTTP ${response.status}: ${response.statusText}`)
+      }
+      
+      const data = await response.json()
+      if (!data.success) {
+        throw new Error(data.error || '启动预览失败')
+      }
+      
+      previewData.streamInfo = data.data
+      previewData.loading = false
+      
+      // 显示成功提示，告知用户流已添加到媒体流管理
+      ElMessage.success({
+        message: '预览已启动，流已添加到媒体流管理',
+        duration: 3000
+      })
+      
+      // 通知 PreviewPlayer 开始播放
+      await nextTick()
+      if (previewPlayerRef.value && previewData.streamInfo) {
+        const p = (typeof previewPlayerRef.value.startWithStreamInfo === 'function') 
+          ? previewPlayerRef.value 
+          : (previewPlayerRef.value.value && typeof previewPlayerRef.value.value.startWithStreamInfo === 'function') 
+            ? previewPlayerRef.value.value 
+            : (previewPlayerRef.value.$ && previewPlayerRef.value.$.exposed && typeof previewPlayerRef.value.$.exposed.startWithStreamInfo === 'function') 
+              ? previewPlayerRef.value.$.exposed 
+              : null
+        if (p) {
+          await p.startWithStreamInfo(previewData.streamInfo)
+        } else {
+          try { if (typeof previewPlayerRef.value.startPreview === 'function') await previewPlayerRef.value.startPreview() } catch (_) {}
+        }
+      }
+      
+      return // 成功，退出循环
+    } catch (e: any) {
+      lastError = e.message || String(e)
+      console.warn(`[失败 ${attempt}/${maxRetries}] 启动预览失败: ${lastError}`)
+      
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 1500))
       }
     }
-  } catch (e: any) {
-    console.error('启动预览失败:', e)
-    previewData.error = e.message || '启动预览失败'
-    ElMessage.error(`启动预览失败: ${e.message}`)
-  } finally {
-    previewData.loading = false
   }
+
+  // 所有重试都失败了
+  previewData.loading = false
+  previewData.error = lastError
+  
+  // 解析错误信息，提供诊断建议
+  const showDetailedError = () => {
+    let title = '启动预览失败'
+    let message = lastError
+    
+    // 检查特定的错误类型
+    if (lastError.includes('RTSP')) {
+      title = 'RTSP 地址不可用'
+      message = `${lastError}\n\n排查步骤：\n1. 检查设备是否在线（检查设备管理中的状态）\n2. 尝试在编辑凭证中修改凭证后重试\n3. 检查网络连接\n4. 如果问题持续，请查看服务器日志`
+    } else if (lastError.includes('认证') || lastError.includes('401')) {
+      title = 'RTSP 认证失败'
+      message = `${lastError}\n\n请检查：\n1. 用户名和密码是否正确\n2. 点击"编辑凭证"更新设备凭据\n3. 重试启动预览`
+    } else if (lastError.includes('Connection') || lastError.includes('dial')) {
+      title = '无法连接到设备'
+      message = `${lastError}\n\n请检查：\n1. 设备是否在线\n2. 网络连接是否正常\n3. 防火墙是否阻止了连接`
+    } else if (lastError.includes('500') || lastError.includes('Internal')) {
+      title = '服务器错误'
+      message = `${lastError}\n\n请查看服务器日志获取更多信息`
+    }
+    
+    ElMessageBox.alert(message, title, {
+      confirmButtonText: '关闭',
+      type: 'error',
+      dangerouslyUseHTMLString: false
+    })
+  }
+  
+  ElMessage.error(`启动预览失败: ${lastError.substring(0, 100)}...`)
+  
+  // 延迟显示详细信息，避免与错误消息冲突
+  setTimeout(() => {
+    showDetailedError()
+  }, 500)
 }
 
 // 停止预览并关闭对话框
@@ -1155,36 +1011,192 @@ const copyToClipboard = async (text: string) => {
 
 // (重复的 showProfiles 已删除，使用文件后部定义的带认证版本)
 
-// 根据配置获取流地址
+// 根据配置获取流并播放（带重试机制）
 const getStreamByProfile = async (profileToken: string) => {
   if (!profilesData.device) return
 
-  try {
-    // 使用与预览相同的接口启动临时预览代理，后端会返回预览会话信息
-    const response = await fetch(`/api/onvif/devices/${profilesData.device.deviceId}/preview/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileToken })
-    })
-    if (!response.ok) throw new Error('获取流地址失败')
-    const data = await response.json()
+  const maxRetries = 2
+  let lastError = ''
 
-    if (data && data.success && data.data) {
-      // 优先使用 data.SourceURL 或 data.RtspURL 或常见字段
-      const session: any = data.data
-      const possible = session.SourceURL || session.SourceUrl || session.source_url || session.RtspURL || session.rtsp_url || session.RTSP || ''
-      const streamUrl = possible || session.RtmpURL || session.RtmpUrl || session.RTMP || ''
-      if (streamUrl) {
-        await navigator.clipboard.writeText(streamUrl)
-        ElMessage.success(`流地址已复制: ${streamUrl}`)
+  // 关闭配置文件对话框，打开预览对话框
+  profilesData.showDialog = false
+  previewData.device = profilesData.device
+  previewData.error = ''
+  previewData.streamInfo = null
+  previewData.credentials.username = profilesData.device.username || 'admin'
+  previewData.credentials.password = profilesData.device.password || 'a123456'
+  previewData.selectedProfile = profileToken // 保存当前使用的 profile token
+  previewData.showDialog = true
+  previewData.loading = true
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[尝试 ${attempt}/${maxRetries}] 获取流地址并播放 (Profile: ${profileToken})`)
+      
+      const response = await fetch(`/api/onvif/devices/${profilesData.device.deviceId}/preview/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          profileToken,
+          username: previewData.credentials.username,
+          password: previewData.credentials.password
+        })
+      })
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || `HTTP ${response.status}`)
+      }
+      
+      const data = await response.json()
+
+      if (data && data.success && data.data) {
+        previewData.streamInfo = data.data
+        previewData.loading = false
+        
+        // 通知 PreviewPlayer 开始播放
+        await nextTick()
+        if (previewPlayerRef.value && previewData.streamInfo) {
+          const p = (typeof previewPlayerRef.value.startWithStreamInfo === 'function') 
+            ? previewPlayerRef.value 
+            : (previewPlayerRef.value.value && typeof previewPlayerRef.value.value.startWithStreamInfo === 'function') 
+              ? previewPlayerRef.value.value 
+              : (previewPlayerRef.value.$ && previewPlayerRef.value.$.exposed && typeof previewPlayerRef.value.$.exposed.startWithStreamInfo === 'function') 
+                ? previewPlayerRef.value.$.exposed 
+                : null
+          if (p) {
+            await p.startWithStreamInfo(previewData.streamInfo)
+          } else {
+            try { if (typeof previewPlayerRef.value.startPreview === 'function') await previewPlayerRef.value.startPreview() } catch (_) {}
+          }
+        }
+        
+        ElMessage.success({
+          message: `使用配置 ${profileToken} 启动播放成功，流已添加到媒体流管理`,
+          duration: 3000
+        })
+        return
       } else {
-        ElMessage.warning('未找到可用的流地址，请在预览中查看')
+        throw new Error(data?.message || '启动预览失败')
+      }
+    } catch (error: any) {
+      lastError = error.message
+      console.warn(`[失败 ${attempt}/${maxRetries}] ${lastError}`)
+      
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 800))
+      }
+    }
+  }
+
+  // 所有重试都失败了
+  previewData.loading = false
+  previewData.error = lastError
+  ElMessage.error(`获取流地址失败: ${lastError}`)
+}
+
+// 显示添加通道对话框
+const showAddChannelDialog = async (row: Device) => {
+  addChannelData.device = row
+  addChannelData.showDialog = true
+  addChannelData.loading = true
+  addChannelData.selectedProfiles = []
+  
+  try {
+    // 获取设备的Profile列表（使用GET方法）
+    const response = await fetch(`/api/onvif/devices/${row.deviceId}/profiles`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new Error(errorData.message || `HTTP ${response.status}`)
+    }
+    
+    const data = await response.json()
+    if (data && data.profiles) {
+      addChannelData.profiles = data.profiles
+      if (data.profiles.length === 0) {
+        ElMessage.warning('设备没有可用的配置文件')
       }
     } else {
-      throw new Error(data && data.message ? data.message : '启动预览失败')
+      throw new Error(data?.error || '获取配置失败')
     }
-  } catch (error) {
-    ElMessage.error(`获取流地址失败: ${error}`)
+  } catch (error: any) {
+    console.error('获取配置列表失败:', error)
+    ElMessage.error('获取配置列表失败: ' + error.message)
+    addChannelData.showDialog = false
+  } finally {
+    addChannelData.loading = false
+  }
+}
+
+// 处理通道选择变化
+const handleChannelSelectionChange = (selection: MediaProfile[]) => {
+  addChannelData.selectedProfiles = selection
+}
+
+// 确认添加选中的通道
+const confirmAddChannels = async () => {
+  if (addChannelData.selectedProfiles.length === 0) {
+    ElMessage.warning('请至少选择一个配置')
+    return
+  }
+  
+  addChannelData.adding = true
+  const device = addChannelData.device
+  let successCount = 0
+  let failCount = 0
+  
+  try {
+    for (const profile of addChannelData.selectedProfiles) {
+      try {
+        const channelData = {
+          // ONVIF设备不提供channelId，让后端自动生成
+          channelName: `${device?.name}-${profile.name}`,
+          deviceId: device?.deviceId,
+          deviceType: 'onvif',
+          status: device?.status,
+          manufacturer: device?.manufacturer,
+          model: device?.model,
+          profileToken: profile.token,
+          resolution: profile.resolution,
+          encoding: profile.encoding,
+          fps: profile.fps,
+          bitrate: profile.bitrate,
+          streamUrl: '',
+        }
+        
+        const response = await fetch('/api/channel/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(channelData)
+        })
+        
+        const result = await response.json()
+        
+        // 后端返回 status: "ok" 表示成功
+        if (result.status === 'ok' || result.success) {
+          successCount++
+        } else {
+          failCount++
+          console.error(`添加配置 ${profile.name} 失败:`, result.message || result.error)
+        }
+      } catch (error) {
+        failCount++
+        console.error(`添加配置 ${profile.name} 失败:`, error)
+      }
+    }
+    
+    if (successCount > 0) {
+      ElMessage.success(`成功添加 ${successCount} 个通道${failCount > 0 ? `，失败 ${failCount} 个` : ''}`)
+      addChannelData.showDialog = false
+    } else {
+      ElMessage.error('所有通道添加失败')
+    }
+  } finally {
+    addChannelData.adding = false
   }
 }
 
@@ -1255,29 +1267,79 @@ const updateCredentials = async () => {
   }
 }
 
-// 显示配置文件
+// 显示配置文件（带重试机制和详细错误处理）
 const showProfiles = async (row: Device) => {
   profilesData.device = row
   profilesData.showDialog = true
   profilesData.loading = true
-  // 先认证
-  const ok = await ensureDeviceAuth(row)
-  if (!ok) {
-    profilesData.loading = false
-    return
+  
+  const maxRetries = 3
+  let lastError = ''
+  
+  // 重试机制：最多重试 3 次
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[尝试 ${attempt}/${maxRetries}] 获取设备 ${row.deviceId} 的配置文件`)
+      
+      const response = await fetch(`/api/onvif/devices/${row.deviceId}/profiles`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 15000 // 设置 15 秒超时
+      })
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`)
+      }
+      
+      const data = await response.json()
+      
+      // 成功获取配置文件
+      if (data.profiles && data.profiles.length > 0) {
+        profilesData.profiles = data.profiles
+        ElMessage.success(`成功获取 ${data.profiles.length} 个媒体配置`)
+        profilesData.loading = false
+        return
+      } else if (data.profiles) {
+        profilesData.profiles = []
+        ElMessage.warning('设备没有可用的媒体配置文件')
+        profilesData.loading = false
+        return
+      }
+      
+      throw new Error('响应数据格式错误')
+    } catch (error: any) {
+      lastError = error.message || String(error)
+      console.warn(`[失败 ${attempt}/${maxRetries}] ${lastError}`)
+      
+      // 如果还有重试次数，等待 1 秒后重试
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
+    }
   }
   
-  try {
-    const response = await fetch(`/api/onvif/devices/${row.deviceId}/profiles`)
-    if (!response.ok) throw new Error('获取配置文件失败')
-    const data = await response.json()
-    profilesData.profiles = data.profiles || []
-  } catch (error) {
-    ElMessage.error(`获取配置文件失败: ${error}`)
-    profilesData.profiles = []
-  } finally {
-    profilesData.loading = false
-  }
+  // 所有重试都失败了
+  profilesData.loading = false
+  profilesData.profiles = []
+  
+  // 提供更详细的错误信息和诊断建议
+  const errorMessage = `获取配置文件失败: ${lastError}`
+  ElMessageBox.confirm(
+    `${errorMessage}\n\n可能原因：\n1. 设备凭证不正确或已过期\n2. 设备暂时离线\n3. 网络连接不稳定\n4. 设备不支持该操作\n\n建议：\n- 检查凭证是否正确（点击编辑凭证按钮）\n- 尝试刷新设备列表\n- 检查网络连接\n- 稍后重试`,
+    '配置文件获取失败',
+    {
+      confirmButtonText: '编辑凭证',
+      cancelButtonText: '关闭',
+      type: 'warning'
+    }
+  ).then(() => {
+    // 用户点击编辑凭证
+    showEditCredentials(row)
+    profilesData.showDialog = false
+  }).catch(() => {
+    // 用户点击关闭
+  })
 }
 
 // 根据服务类型友好展示服务名
@@ -1353,11 +1415,7 @@ const resetAddForm = () => {
   addForm.name = ''
 }
 
-const resetBatchForm = () => {
-  batchForm.method = 'json'
-  batchForm.jsonData = ''
-  batchForm.csvData = ''
-}
+
 
 const resetUpdateIPForm = () => {
   updateIPForm.deviceID = ''
@@ -1566,18 +1624,5 @@ onUnmounted(() => {
 }
 
 /* 发现设备对话框样式 */
-.discover-hint {
-  margin-bottom: 10px;
-}
 
-.discover-addr {
-  font-family: monospace;
-  color: #409EFF;
-}
-
-.discover-footer {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-}
 </style>

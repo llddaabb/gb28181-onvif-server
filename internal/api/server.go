@@ -43,6 +43,8 @@ type Server struct {
 	streamManager      *StreamManager
 	startTime          time.Time
 	recordingWatchStop chan struct{}
+	gb28181Running     bool // GB28181 服务运行状态
+	onvifRunning       bool // ONVIF 服务运行状态
 }
 
 // NewServer 创建一个新的API服务器实例。
@@ -59,6 +61,8 @@ func NewServer(cfg *config.Config, gbServer *gb28181.Server, onvifMgr *onvif.Man
 		recordingManager: NewRecordingManager(),
 		streamManager:    NewStreamManager(),
 		startTime:        time.Now(),
+		gb28181Running:   true, // 默认启动时为运行状态
+		onvifRunning:     true, // 默认启动时为运行状态
 	}
 	if zlmSrv != nil {
 		s.previewManager = preview.NewManager(gbServer, zlmSrv)
@@ -71,9 +75,39 @@ func (s *Server) SetZLMProcess(pm *zlm.ProcessManager) {
 	s.zlmProcess = pm
 }
 
+// SetServiceStatus 设置服务运行状态
+func (s *Server) SetServiceStatus(gb28181Running, onvifRunning bool) {
+	s.gb28181Running = gb28181Running
+	s.onvifRunning = onvifRunning
+}
+
 // PreviewManager 返回预览管理器实例
 func (s *Server) PreviewManager() *preview.Manager {
 	return s.previewManager
+}
+
+// SetupAutoStreamProxy 设置 ONVIF 设备发现后自动添加流代理
+func (s *Server) SetupAutoStreamProxy() {
+	if s.onvifManager == nil || s.previewManager == nil || s.zlmServer == nil {
+		debug.Warn("api", "自动流代理设置失败: onvifManager=%v, previewManager=%v, zlmServer=%v",
+			s.onvifManager != nil, s.previewManager != nil, s.zlmServer != nil)
+		return
+	}
+
+	// 获取 ZLM 端口配置
+	httpPort := 8080
+	rtmpPort := 1935
+	if s.config.ZLM != nil {
+		httpPort = s.config.ZLM.GetHTTPPort()
+		rtmpPort = s.config.ZLM.GetRTMPPort()
+	}
+
+	s.onvifManager.SetStreamProxyCallback(func(deviceID, rtspURL, username, password string) error {
+		debug.Info("api", "自动添加流代理: deviceID=%s, rtspURL=%s", deviceID, rtspURL)
+		_, err := s.previewManager.StartRTSPProxy(deviceID, rtspURL, "onvif", "127.0.0.1", httpPort, rtmpPort, username, password)
+		return err
+	})
+	debug.Info("api", "✅ 自动流代理已设置")
 }
 
 // SetDiskManager 设置磁盘管理器
@@ -276,6 +310,11 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	r.HandleFunc("/api/resources", s.handleGetResources).Methods("GET")
 	r.HandleFunc("/api/logs/latest", s.handleGetLatestLogs).Methods("GET")
 
+	// 服务控制API
+	r.HandleFunc("/api/services/status", s.handleGetServiceStatus).Methods("GET")
+	r.HandleFunc("/api/services/gb28181/control", s.handleControlGB28181Service).Methods("POST")
+	r.HandleFunc("/api/services/onvif/control", s.handleControlONVIFService).Methods("POST")
+
 	// 配置管理
 	r.HandleFunc("/api/config", s.handleGetConfig).Methods("GET")
 	r.HandleFunc("/api/config", s.handleUpdateConfig).Methods("PUT")
@@ -292,7 +331,6 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	gb28181Group.HandleFunc("/devices/{id}/preview/stop", s.handleStopGB28181Preview).Methods("POST")
 	gb28181Group.HandleFunc("/devices/{id}/channels/{channelId}/preview/start", s.handleStartGB28181ChannelPreview).Methods("POST")
 	gb28181Group.HandleFunc("/devices/{id}/channels/{channelId}/preview/stop", s.handleStopGB28181ChannelPreview).Methods("POST")
-	gb28181Group.HandleFunc("/devices/{id}/channels/{channelId}/preview/test", s.handleTestGB28181ChannelPreview).Methods("POST")
 	gb28181Group.HandleFunc("/devices/{id}/ptz", s.handleGB28181PTZ).Methods("POST")
 	gb28181Group.HandleFunc("/discover", s.handleDiscoverGB28181Devices).Methods("POST")
 	gb28181Group.HandleFunc("/statistics", s.handleGetGB28181Statistics).Methods("GET")
@@ -595,7 +633,11 @@ func (s *Server) startPreview(r *http.Request, deviceID, channelID, rtspURL, app
 				rtspPassword = dev.Password
 			}
 		}
+		debug.Info("preview", "添加RTSP流代理: deviceID=%s, app=%s, rtspURL=%s", deviceID, app, rtspURL)
 		res, err = s.previewManager.StartRTSPProxy(deviceID, rtspURL, app, zlmHost, httpPort, rtmpPort, rtspUser, rtspPassword)
+		if err == nil {
+			debug.Info("preview", "RTSP流代理添加成功: streamID=%s, flvURL=%s", res.StreamID, res.FlvURL)
+		}
 	} else {
 		// GB28181 流
 		res, err = s.previewManager.StartChannelPreview(deviceID, channelID, app, zlmHost, httpPort, rtmpPort)
@@ -610,6 +652,7 @@ func (s *Server) startPreview(r *http.Request, deviceID, channelID, rtspURL, app
 	res.FlvURL = urls.FlvURL
 	res.WsFlvURL = urls.WsFlvURL
 	res.HlsURL = urls.HlsURL
+
 	// RtmpURL 已经在 preview.Manager 中生成
 
 	return res, nil

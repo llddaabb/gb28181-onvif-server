@@ -255,9 +255,17 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
+        <el-table-column label="操作" width="330" fixed="right">
           <template #default="{ row }">
             <el-button-group>
+              <el-tooltip content="添加通道" placement="top">
+                <el-button 
+                  type="success" 
+                  size="small"
+                  @click.stop="showAddChannelDialog(row)">
+                  ➕
+                </el-button>
+              </el-tooltip>
               <el-tooltip content="视频预览" placement="top">
                 <el-button 
                   type="success" 
@@ -351,6 +359,7 @@
             :device="previewData.device"
             :channels="previewData.channels"
             :selectedChannelId="previewData.selectedChannelId"
+            :showPtz="previewData.device?.ptzSupported === true"
             @update:selectedChannelId="(v) => previewData.selectedChannelId = v"
             @update:show="(v) => previewData.showDialog = v"
           />
@@ -526,8 +535,8 @@
         </el-table-column>
         <el-table-column label="PTZ" width="80" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.ptzType > 0 ? 'success' : 'info'" size="small">
-              {{ row.ptzType > 0 ? '支持' : '不支持' }}
+            <el-tag :type="row.ptzSupported ? 'success' : 'info'" size="small">
+              {{ row.ptzSupported ? '支持' : '不支持' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -544,7 +553,7 @@
               <el-button 
                 type="warning" 
                 size="small"
-                :disabled="row.ptzType <= 0 || (row.status !== 'ON' && row.status !== 'online')"
+                :disabled="!row.ptzSupported || (row.status !== 'ON' && row.status !== 'online')"
                 @click="ptzControlChannel(row)">
                 🎮
               </el-button>
@@ -555,6 +564,70 @@
 
       <template #footer>
         <el-button @click="channelsData.showDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 添加通道选择对话框 -->
+    <el-dialog 
+      v-model="addChannelData.showDialog" 
+      :title="`添加通道 - ${addChannelData.device?.name || addChannelData.device?.deviceId}`"
+      width="900px">
+      <el-alert 
+        type="info" 
+        :closable="false"
+        style="margin-bottom: 16px;">
+        <template #title>
+          选择要添加到通道管理的通道
+        </template>
+      </el-alert>
+      
+      <el-table 
+        :data="addChannelData.channels" 
+        v-loading="addChannelData.loading"
+        @selection-change="handleChannelSelectionChange"
+        stripe
+        max-height="400">
+        <el-table-column type="selection" width="55"></el-table-column>
+        <el-table-column prop="channelId" label="通道ID" width="200">
+          <template #default="{ row }">
+            <span style="font-family: monospace; font-size: 12px;">{{ row.channelId }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="name" label="通道名称" min-width="120">
+          <template #default="{ row }">
+            <span>{{ row.name || '未命名通道' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="manufacturer" label="厂商" width="100">
+          <template #default="{ row }">
+            <span>{{ row.manufacturer || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag :type="row.status === 'ON' || row.status === 'online' ? 'success' : 'danger'" size="small">
+              {{ row.status === 'ON' || row.status === 'online' ? '在线' : '离线' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="PTZ" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag :type="row.ptzSupported ? 'success' : 'info'" size="small">
+              {{ row.ptzSupported ? '支持' : '不支持' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <template #footer>
+        <el-button @click="addChannelData.showDialog = false">取消</el-button>
+        <el-button 
+          type="primary" 
+          @click="confirmAddChannels"
+          :disabled="addChannelData.selectedChannels.length === 0"
+          :loading="addChannelData.adding">
+          添加选中通道 ({{ addChannelData.selectedChannels.length }})
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -592,6 +665,7 @@ interface Channel {
   name: string
   status: string
   ptzType: number
+  ptzSupported: boolean
   manufacturer: string
   model: string
   longitude: string
@@ -714,6 +788,16 @@ const channelsData = reactive({
   device: null as Device | null,
   channels: [] as Channel[],
   loading: false
+})
+
+// 添加通道数据
+const addChannelData = reactive({
+  showDialog: false,
+  device: null as Device | null,
+  channels: [] as Channel[],
+  selectedChannels: [] as Channel[],
+  loading: false,
+  adding: false
 })
 
 // 使用 PreviewPlayer 组件，不再直接引用 video 元素
@@ -933,6 +1017,97 @@ const previewChannel = (channel: Channel) => {
     channelsData.showDialog = false
     // 直接开始预览
     if (previewPlayerRef.value) previewPlayerRef.value.startPreview(previewData.selectedChannelId)
+  }
+}
+
+// 显示添加通道对话框
+const showAddChannelDialog = async (row: Device) => {
+  addChannelData.device = row
+  addChannelData.showDialog = true
+  addChannelData.loading = true
+  addChannelData.selectedChannels = []
+  
+  try {
+    // 获取设备的通道列表
+    const response = await fetch(`/api/gb28181/devices/${row.deviceId}/channels`)
+    if (!response.ok) {
+      throw new Error('获取通道列表失败')
+    }
+    const data = await response.json()
+    if (data.success && data.channels) {
+      addChannelData.channels = data.channels
+    } else {
+      throw new Error(data.error || '获取通道失败')
+    }
+  } catch (error: any) {
+    console.error('获取通道列表失败:', error)
+    ElMessage.error('获取通道列表失败: ' + error.message)
+    addChannelData.showDialog = false
+  } finally {
+    addChannelData.loading = false
+  }
+}
+
+// 处理通道选择变化
+const handleChannelSelectionChange = (selection: Channel[]) => {
+  addChannelData.selectedChannels = selection
+}
+
+// 确认添加选中的通道
+const confirmAddChannels = async () => {
+  if (addChannelData.selectedChannels.length === 0) {
+    ElMessage.warning('请至少选择一个通道')
+    return
+  }
+  
+  addChannelData.adding = true
+  const device = addChannelData.device
+  let successCount = 0
+  let failCount = 0
+  
+  try {
+    for (const channel of addChannelData.selectedChannels) {
+      try {
+        const channelData = {
+          channelId: channel.channelId,
+          channelName: channel.name || '未命名通道',
+          deviceId: device?.deviceId,
+          deviceType: 'gb28181',
+          status: channel.status,
+          manufacturer: channel.manufacturer,
+          model: channel.model,
+          ptzType: channel.ptzType || 0,
+          streamUrl: '',
+        }
+        
+        const response = await fetch('/api/channel/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(channelData)
+        })
+        
+        const result = await response.json()
+        
+        if (result.status === 'ok' || result.success) {
+          successCount++
+        } else {
+          failCount++
+          console.error(`添加通道 ${channel.name} 失败:`, result.message || result.error)
+        }
+      } catch (error) {
+        failCount++
+        console.error(`添加通道 ${channel.name} 失败:`, error)
+      }
+    }
+    
+    if (successCount > 0) {
+      ElMessage.success(`成功添加 ${successCount} 个通道${failCount > 0 ? `，失败 ${failCount} 个` : ''}`)
+      addChannelData.showDialog = false
+    } else {
+      ElMessage.error('所有通道添加失败')
+    }
+  } finally {
+    addChannelData.adding = false
   }
 }
 

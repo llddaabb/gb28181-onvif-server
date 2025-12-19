@@ -425,12 +425,12 @@ func (pm *ProcessManager) waitProcess() {
 	}
 }
 
-// readOutput 读取进程输出
+// readOutput 读取进程输出（已禁用日志）
 func (pm *ProcessManager) readOutput(name string, r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		line := scanner.Text()
-		log.Printf("[ZLM-%s] %s", name, line)
+		// 禁用 ZLM 日志输出，仅丢弃数据避免管道阻塞
+		_ = scanner.Text()
 	}
 }
 

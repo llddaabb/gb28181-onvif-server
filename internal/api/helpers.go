@@ -70,14 +70,21 @@ type StreamURLs struct {
 // buildStreamURLs 构建流访问URL
 func (s *Server) buildStreamURLs(r *http.Request, app, streamID string) StreamURLs {
 	zlmHost := s.getZLMHost(r)
-	_, rtmpPort, _ := s.getZLMPorts()
+	httpPort, rtmpPort, _ := s.getZLMPorts()
 
-	// 使用相对路径，让前端使用自己的 origin，避免跨域问题
-	// /zlm/ 路径会被代理到 ZLM 服务器
+	// 判断请求协议
+	scheme := "http"
+	wsScheme := "ws"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+		wsScheme = "wss"
+	}
+
+	// 构建完整的 URL，包含服务器地址和端口
 	return StreamURLs{
-		FlvURL:   fmt.Sprintf("/zlm/%s/%s.live.flv", app, streamID),
-		WsFlvURL: fmt.Sprintf("/zlm/%s/%s.live.flv", app, streamID),
-		HlsURL:   fmt.Sprintf("/zlm/%s/%s/hls.m3u8", app, streamID),
+		FlvURL:   fmt.Sprintf("%s://%s:%d/%s/%s.live.flv", scheme, zlmHost, httpPort, app, streamID),
+		WsFlvURL: fmt.Sprintf("%s://%s:%d/%s/%s.live.flv", wsScheme, zlmHost, httpPort, app, streamID),
+		HlsURL:   fmt.Sprintf("%s://%s:%d/%s/%s/hls.m3u8", scheme, zlmHost, httpPort, app, streamID),
 		RtmpURL:  fmt.Sprintf("rtmp://%s:%d/%s/%s", zlmHost, rtmpPort, app, streamID),
 	}
 }

@@ -126,6 +126,13 @@
                 :device="null"
                 :channels="[]"
                 :selectedChannelId="''"
+                :defaultHeight="'100%'"
+                :showPtz="slot.ptzSupported === true && fullscreenSlotIndex === index"
+                :ptzSupported="slot.ptzSupported"
+                :ptzDeviceId="slot.ptzDeviceId"
+                :ptzChannelId="slot.ptzChannelId"
+                :deviceType="slot.streamType"
+                @fullscreenChange="(isFs: boolean) => onSlotFullscreenChange(index, isFs)"
               />
               <div class="video-overlay">
                 <div class="stream-info">
@@ -221,6 +228,10 @@ interface PreviewSlot {
   loading: boolean
   error: string
   player: any
+  // PTZ 支持
+  ptzSupported?: boolean
+  ptzDeviceId?: string
+  ptzChannelId?: string
 }
 
 interface TreeNode {
@@ -257,6 +268,7 @@ const rows = ref(2)
 // 槽位数据
 const slots = ref<PreviewSlot[]>([])
 const selectedSlot = ref<number | null>(null)
+const fullscreenSlotIndex = ref<number | null>(null)  // 当前全屏的槽位索引
 // per-slot PreviewPlayer refs
 const playerRefs = ref<Record<number, any>>({})
 
@@ -265,6 +277,15 @@ const setPlayerRef = (index: number, el: any) => {
     delete playerRefs.value[index]
   } else {
     playerRefs.value[index] = el
+  }
+}
+
+// 处理单个 PreviewPlayer 全屏状态变化
+const onSlotFullscreenChange = (index: number, isFullscreen: boolean) => {
+  if (isFullscreen) {
+    fullscreenSlotIndex.value = index
+  } else {
+    fullscreenSlotIndex.value = null
   }
 }
 
@@ -353,7 +374,7 @@ const fetchChannels = async () => {
       for (const device of devices) {
         const deviceNode: TreeNode = {
           id: `gb28181-device-${device.deviceId || device.id}`,
-          label: device.name || device.deviceId || device.id,
+          label: device.deviceId || device.id,
           icon: '📷',
           type: 'group',
           status: device.status,
@@ -364,7 +385,7 @@ const fetchChannels = async () => {
           for (const ch of device.channels) {
             deviceNode.children!.push({
               id: `gb28181-${ch.channelId || ch.id}`,
-              label: ch.name || ch.channelName || ch.channelId || ch.id,
+              label: ch.channelId || ch.id,
               icon: '🎥',
               type: 'gb28181',
               status: ch.status,
@@ -401,7 +422,7 @@ const fetchChannels = async () => {
         type: 'group',
         children: onvifDevices.map((d: any) => ({
           id: `onvif-${d.id}`,
-          label: d.name || d.ip || d.id,
+          label: d.ip || d.id,
           icon: '📹',
           type: 'onvif' as const,
           status: d.status === 'online' ? 'ON' : d.status,
@@ -512,6 +533,10 @@ const addStreamToNextSlot = async (data: TreeNode) => {
     slot.streamKey = channelId
     slot.streamName = channel.name || channel.channelName || channelId
     slot.streamType = 'gb28181'
+    // 保存 PTZ 信息
+    slot.ptzSupported = channel.ptzSupported === true
+    slot.ptzDeviceId = deviceId
+    slot.ptzChannelId = channelId
     
     // 先检查流是否已存在（直接尝试播放地址）
     const liveStreamUrl = streamId ? `http://${host}:8080/${appName}/${streamId}.live.flv` : `http://${host}:8080/live/${channelId}.live.flv`
@@ -574,11 +599,46 @@ const addStreamToNextSlot = async (data: TreeNode) => {
     }
   } else if (data.type === 'onvif' && data.data) {
     const device = data.data
-    slot.streamKey = device.id
+    const deviceId = device.id || device.deviceId  // 使用实际的设备 ID，不是树节点 ID
+    
+    slot.streamKey = deviceId
     slot.streamName = device.name || device.ip
-    // ONVIF 需要先通过代理拉流
-    slot.streamUrl = `http://${host}:8080/onvif/${device.id}.live.flv`
     slot.streamType = 'onvif'
+    // 保存 PTZ 信息
+    slot.ptzSupported = device.ptzSupported === true
+    slot.ptzDeviceId = deviceId
+    slot.ptzChannelId = ''
+    
+    // ONVIF 需要先调用后端 API 来启动预览并获取真实的流地址
+    try {
+      const response = await fetch(`/api/onvif/devices/${encodeURIComponent(deviceId)}/preview/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: device.username || 'admin',
+          password: device.password || ''
+        })
+      })
+      const result = await response.json()
+      
+      if (result.success && result.data) {
+        const host = window.location.hostname
+        // 使用 API 返回的 FLV 或 HLS 地址
+        slot.flvUrl = result.data.flv_url ? result.data.flv_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
+        slot.hlsUrl = result.data.hls_url ? result.data.hls_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
+        slot.streamUrl = slot.hlsUrl || slot.flvUrl
+        console.log('ONVIF API 返回的 URLs:', { flv: slot.flvUrl, hls: slot.hlsUrl }, '选用:', slot.streamUrl)
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      } else {
+        throw new Error(result.error || '启动 ONVIF 预览失败')
+      }
+    } catch (error) {
+      console.error('启动 ONVIF 预览失败:', error)
+      slot.error = `ONVIF 预览启动失败: ${error}`
+      slot.loading = false
+      ElMessage.error(`ONVIF 设备添加失败: ${error}`)
+      return
+    }
   }
   
   slot.loading = false
@@ -591,6 +651,14 @@ const addStreamToNextSlot = async (data: TreeNode) => {
   })
   
   ElMessage.success(`已添加到窗口 ${targetIndex + 1}`)
+  
+  // 自动聚焦到下一个空窗口
+  nextTick(() => {
+    const nextEmptyIndex = slots.value.findIndex(s => !s.streamKey)
+    if (nextEmptyIndex !== -1) {
+      selectedSlot.value = nextEmptyIndex
+    }
+  })
 }
 
 // 初始化槽位
@@ -611,7 +679,10 @@ const initSlots = (count: number, keepStreams = false) => {
     streamType: 'gb28181' as const,
     loading: false,
     error: '',
-    player: null
+    player: null,
+    ptzSupported: false,
+    ptzDeviceId: '',
+    ptzChannelId: ''
   }))
   
   // 如果保留流，则将现有流复制到新槽位（尽可能多）
@@ -688,6 +759,7 @@ const playStream = async (index: number) => {
   try { const p = resolvePlayer(playerRefs.value[index]); if (p) await p.stopPreview(); } catch (e) {}
 
   try {
+    // 使用蛇形命名以匹配 API 返回格式，PreviewPlayer 现在支持两种命名
     const info: any = { flv_url: slot.flvUrl || slot.streamUrl, hls_url: slot.hlsUrl || slot.streamUrl }
     await nextTick()
     const player = resolvePlayer(playerRefs.value[index])
@@ -759,20 +831,43 @@ const clearAllStreams = () => {
 const toggleFullscreen = () => {
   if (!previewContainer.value) return
   
+  const elem = previewContainer.value as any
+  
   if (!isFullscreen.value) {
-    if (previewContainer.value.requestFullscreen) {
-      previewContainer.value.requestFullscreen()
+    // 进入全屏 - 兼容多种浏览器
+    if (elem.requestFullscreen) {
+      elem.requestFullscreen()
+    } else if (elem.webkitRequestFullscreen) {
+      elem.webkitRequestFullscreen()
+    } else if (elem.mozRequestFullScreen) {
+      elem.mozRequestFullScreen()
+    } else if (elem.msRequestFullscreen) {
+      elem.msRequestFullscreen()
     }
   } else {
-    if (document.exitFullscreen) {
-      document.exitFullscreen()
+    // 退出全屏 - 兼容多种浏览器
+    const doc = document as any
+    if (doc.exitFullscreen) {
+      doc.exitFullscreen()
+    } else if (doc.webkitExitFullscreen) {
+      doc.webkitExitFullscreen()
+    } else if (doc.mozCancelFullScreen) {
+      doc.mozCancelFullScreen()
+    } else if (doc.msExitFullscreen) {
+      doc.msExitFullscreen()
     }
   }
 }
 
 // 监听全屏变化
 const handleFullscreenChange = () => {
-  isFullscreen.value = !!document.fullscreenElement
+  const doc = document as any
+  isFullscreen.value = !!(
+    doc.fullscreenElement || 
+    doc.webkitFullscreenElement || 
+    doc.mozFullScreenElement || 
+    doc.msFullscreenElement
+  )
 }
 
 // 保存预设
@@ -882,6 +977,9 @@ onMounted(() => {
   loadSavedPresets()
   fetchChannels()
   document.addEventListener('fullscreenchange', handleFullscreenChange)
+  document.addEventListener('webkitfullscreenchange', handleFullscreenChange)
+  document.addEventListener('mozfullscreenchange', handleFullscreenChange)
+  document.addEventListener('MSFullscreenChange', handleFullscreenChange)
 })
 
 onUnmounted(() => {
@@ -891,6 +989,9 @@ onUnmounted(() => {
   })
   clearAllStreams()
   document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  document.removeEventListener('webkitfullscreenchange', handleFullscreenChange)
+  document.removeEventListener('mozfullscreenchange', handleFullscreenChange)
+  document.removeEventListener('MSFullscreenChange', handleFullscreenChange)
 })
 </script>
 
@@ -1047,6 +1148,15 @@ onUnmounted(() => {
   position: relative;
 }
 
+ 
+
+/* 确保播放器填充整个容器 */
+.video-wrapper :deep(.preview-player-root),
+.video-wrapper :deep(.video-player-wrapper) {
+  width: 100% !important;
+  height: 100% !important;
+}
+
 .video-player {
   width: 100%;
   height: 100%;
@@ -1066,6 +1176,8 @@ onUnmounted(() => {
   align-items: flex-start;
   opacity: 0;
   transition: opacity 0.2s;
+  z-index: 2;
+  pointer-events: none;
 }
 
 .video-wrapper:hover .video-overlay {
@@ -1074,6 +1186,7 @@ onUnmounted(() => {
 
 .stream-info {
   color: #fff;
+  pointer-events: none;
 }
 
 .stream-name {
@@ -1084,6 +1197,7 @@ onUnmounted(() => {
 .video-controls {
   display: flex;
   gap: 4px;
+  pointer-events: auto;
 }
 
 .video-loading,

@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"gb28181-onvif-server/internal/onvif"
@@ -194,15 +196,32 @@ func (s *Server) handleRefreshONVIFDevice(w http.ResponseWriter, r *http.Request
 	// 尝试解析请求体，但即使失败也可以继续
 	json.NewDecoder(r.Body).Decode(&req)
 
-	// 如果提供了新的 IP，更新设备信息
-	if req.NewIP != "" {
-		device.IP = req.NewIP
-		if req.NewPort > 0 {
-			device.Port = req.NewPort
+	// 如果提供了新的 IP 或端口，更新设备信息
+	if req.NewIP != "" || req.NewPort > 0 {
+		if err := s.onvifManager.UpdateDeviceIP(deviceID, req.NewIP, req.NewPort); err != nil {
+			respondInternalError(w, fmt.Sprintf("更新设备IP失败: %s", err.Error()))
+			return
 		}
+		// 重新获取更新后的设备信息（使用新的ID）
+		newDeviceID := deviceID
+		if req.NewIP != "" {
+			port := req.NewPort
+			if port == 0 {
+				port = device.Port
+			}
+			newDeviceID = fmt.Sprintf("%s:%d", req.NewIP, port)
+		} else if req.NewPort > 0 {
+			newDeviceID = fmt.Sprintf("%s:%d", device.IP, req.NewPort)
+		}
+		device, _ = s.onvifManager.GetDeviceByID(newDeviceID)
 	}
 
-	// 将更新后的设备保存回管理器（需要在管理器中实现该方法）
+	// 确保 device 不为 nil
+	if device == nil {
+		respondInternalError(w, "设备更新后无法获取设备信息")
+		return
+	}
+
 	respondRaw(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"message": "设备已刷新",
@@ -233,42 +252,128 @@ func (s *Server) handleDeleteONVIFDevice(w http.ResponseWriter, r *http.Request)
 // handleStartONVIFPreview 启动ONVIF设备预览流
 func (s *Server) handleStartONVIFPreview(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
-	profileToken := r.URL.Query().Get("profileToken")
+	deviceID := vars["id"]
 
-	if deviceID == "" || profileToken == "" {
-		respondBadRequest(w, "deviceId 和 profileToken 不能为空")
+	if deviceID == "" {
+		respondBadRequest(w, "deviceId 不能为空")
 		return
 	}
 
 	device, ok := s.onvifManager.GetDeviceByID(deviceID)
 	if !ok {
-		respondNotFound(w, "设备未找到"+device.DeviceID)
+		respondNotFound(w, "设备未找到: "+deviceID)
 		return
 	}
 
-	rtspURL, err := s.onvifManager.GetStreamURI(deviceID, profileToken)
-	if err != nil {
-		respondInternalError(w, fmt.Sprintf("获取流地址失败: %s", err.Error()))
+	// 支持从 query 参数或 body 中获取 profileToken 和凭据
+	profileToken := r.URL.Query().Get("profileToken")
+	var reqUsername, reqPassword string
+
+	// 尝试从 body 中获取参数
+	var reqBody struct {
+		ProfileToken string `json:"profileToken"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err == nil {
+		if profileToken == "" {
+			profileToken = reqBody.ProfileToken
+		}
+		reqUsername = reqBody.Username
+		reqPassword = reqBody.Password
+	}
+
+	// 使用请求中的凭据，或者回退到设备存储的凭据
+	username := reqUsername
+	password := reqPassword
+	if username == "" {
+		username = device.Username
+	}
+	if password == "" {
+		password = device.Password
+	}
+	if username == "" {
+		username = "admin"
+	}
+
+	// 如果还是没有 profileToken，使用默认的第一个 profile
+	if profileToken == "" {
+		profiles, err := s.onvifManager.GetProfiles(deviceID)
+		if err == nil && len(profiles) > 0 {
+			if token, ok := profiles[0]["token"].(string); ok {
+				profileToken = token
+				log.Printf("[ONVIF] 使用默认 profile: %s", profileToken)
+			}
+		}
+	}
+
+	var rtspURL string
+	var err error
+
+	// 如果有 profileToken，尝试通过 ONVIF 获取流地址
+	if profileToken != "" {
+		rtspURL, err = s.onvifManager.GetStreamURI(deviceID, profileToken)
+		if err != nil {
+			log.Printf("[ONVIF] GetStreamURI 失败: %s, 尝试使用设备预设 URL", err.Error())
+		}
+	}
+
+	// 如果 ONVIF 获取失败，使用设备已有的 previewURL
+	if rtspURL == "" && device.PreviewURL != "" {
+		rtspURL = device.PreviewURL
+		log.Printf("[ONVIF] 使用设备预设 previewURL: %s", rtspURL)
+	}
+
+	// 如果还是没有 URL，尝试生成默认的 RTSP URL（适用于海康等设备）
+	if rtspURL == "" {
+		// 使用前面已确定的 username/password
+		if password == "" {
+			password = "a123456789" // 默认密码
+		}
+		// 海康标准 RTSP URL 格式
+		rtspURL = fmt.Sprintf("rtsp://%s:%s@%s:554/Streaming/Channels/101", username, password, device.IP)
+		log.Printf("[ONVIF] 使用默认 RTSP URL 模板: %s", rtspURL)
+	}
+
+	// 如果还是没有 URL，返回错误
+	if rtspURL == "" {
+		respondInternalError(w, "无法获取流地址，请检查设备凭据或配置")
 		return
 	}
 
 	res, err := s.startPreview(r, deviceID, "", rtspURL, "onvif")
 	if err != nil {
-		respondInternalError(w, fmt.Sprintf("启动预览失败: %s", err.Error()))
+		// 记录详细的错误信息
+		log.Printf("[ONVIF] ⚠️ 启动预览失败: %s (RTSP URL: %s)", err.Error(), rtspURL)
+
+		// 返回更有帮助的错误消息
+		var errMsg string
+		if strings.Contains(err.Error(), "404") {
+			errMsg = fmt.Sprintf("RTSP 地址不存在。请检查：\n1. 设备 RTSP 服务是否启用\n2. RTSP 端口是否正确（当前用 554）\n3. 流路径是否正确\n\n生成的 URL: %s", rtspURL)
+		} else if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
+			errMsg = fmt.Sprintf("RTSP 认证失败。请检查用户名和密码是否正确。\n设备凭证: %s / ****", device.Username)
+		} else if strings.Contains(err.Error(), "Connection refused") || strings.Contains(err.Error(), "dial tcp") {
+			errMsg = fmt.Sprintf("无法连接到设备的 RTSP 服务。请检查：\n1. 设备是否在线\n2. RTSP 端口 554 是否可访问\n\n生成的 URL: %s", rtspURL)
+		} else {
+			errMsg = fmt.Sprintf("启动预览失败: %s\n\n生成的 URL: %s", err.Error(), rtspURL)
+		}
+		respondInternalError(w, errMsg)
 		return
 	}
 
 	// 更新设备预览URL
 	s.onvifManager.UpdateDevicePreview(deviceID, res.FlvURL, "")
 
-	respondRaw(w, http.StatusOK, res)
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    res,
+	})
 }
 
 // handleStopONVIFPreview 停止ONVIF设备预览流
 func (s *Server) handleStopONVIFPreview(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
+	deviceID := vars["id"]
 
 	if deviceID == "" {
 		respondBadRequest(w, "deviceId 不能为空")
@@ -287,14 +392,38 @@ func (s *Server) handleStopONVIFPreview(w http.ResponseWriter, r *http.Request) 
 	respondRaw(w, http.StatusOK, res)
 }
 
-func (s *Server) stopPreview(deviceID string, param2 string, param3 string) (any, error) {
-	panic("unimplemented")
+// stopPreview 停止预览流
+func (s *Server) stopPreview(deviceID string, _ string, app string) (any, error) {
+	if s.previewManager == nil {
+		return nil, fmt.Errorf("preview manager 未初始化")
+	}
+
+	var err error
+	if app == "onvif" {
+		// ONVIF 预览使用 RTSP 代理
+		err = s.previewManager.StopRTSPProxy(deviceID, app)
+	} else {
+		// GB28181 预览使用通道预览
+		// 注意：此处需要 channelID，但在 ONVIF 上下文中 channelID 为空
+		// 我们从设备 ID 推导出 channelID（假设设备 ID 包含 channelID 信息）
+		// 或者使用空 channelID 并让管理器自动处理
+		err = s.previewManager.StopChannelPreview(deviceID, "")
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"message": "预览已停止",
+	}, nil
 }
 
 // handleONVIFPTZControl ONVIF PTZ 控制
 func (s *Server) handleONVIFPTZControl(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
+	deviceID := vars["id"] // 路由参数为 id
 
 	var req struct {
 		ProfileToken string `json:"profileToken"`
@@ -380,9 +509,27 @@ func (s *Server) handleONVIFPTZControl(w http.ResponseWriter, r *http.Request) {
 // handleGetONVIFProfiles 获取ONVIF设备媒体配置
 func (s *Server) handleGetONVIFProfiles(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
+	deviceID := vars["id"]
 
-	profiles, err := s.onvifManager.GetProfiles(deviceID)
+	// 支持从 query 参数或 body 中获取凭据
+	username := r.URL.Query().Get("username")
+	password := r.URL.Query().Get("password")
+
+	// 尝试从 body 中获取凭据
+	var reqBody struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err == nil {
+		if username == "" {
+			username = reqBody.Username
+		}
+		if password == "" {
+			password = reqBody.Password
+		}
+	}
+
+	profiles, err := s.onvifManager.GetProfilesWithCredentials(deviceID, username, password)
 	if err != nil {
 		respondInternalError(w, fmt.Sprintf("获取 Profiles 失败: %s", err.Error()))
 		return
@@ -396,7 +543,7 @@ func (s *Server) handleGetONVIFProfiles(w http.ResponseWriter, r *http.Request) 
 // handleGetONVIFPresets 获取ONVIF设备预置位
 func (s *Server) handleGetONVIFPresets(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
+	deviceID := vars["id"]
 	profileToken := r.URL.Query().Get("profileToken")
 
 	if profileToken == "" {
@@ -418,7 +565,7 @@ func (s *Server) handleGetONVIFPresets(w http.ResponseWriter, r *http.Request) {
 // handleGetONVIFSnapshotURI 获取抓图地址
 func (s *Server) handleGetONVIFSnapshotURI(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
+	deviceID := vars["id"]
 	profileToken := r.URL.Query().Get("profileToken")
 
 	if profileToken == "" {
@@ -471,77 +618,6 @@ func (s *Server) handleONVIFUpdateConfig(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondOK(w, "设备配置更新成功")
-}
-
-// handleONVIFGetStatus 获取设备状态
-func (s *Server) handleONVIFGetStatus(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
-
-	status, err := s.onvifManager.GetDeviceStatus(deviceID)
-	if err != nil {
-		respondInternalError(w, fmt.Sprintf("获取设备状态失败: %s", err.Error()))
-		return
-	}
-
-	respondRaw(w, http.StatusOK, map[string]interface{}{
-		"status": status,
-	})
-}
-
-// handleGetONVIFStats 获取ONVIF模块统计信息
-func (s *Server) handleGetONVIFStats(w http.ResponseWriter, r *http.Request) {
-	stats := s.onvifManager.GetStats()
-	respondRaw(w, http.StatusOK, stats)
-}
-
-// handleONVIFExport 导出ONVIF设备列表
-func (s *Server) handleONVIFExport(w http.ResponseWriter, r *http.Request) {
-	deviceList := s.onvifManager.ExportDevices()
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", "attachment; filename=onvif_devices.json")
-	json.NewEncoder(w).Encode(deviceList)
-}
-
-// handleONVIFImport 导入ONVIF设备列表
-func (s *Server) handleONVIFImport(w http.ResponseWriter, r *http.Request) {
-	var deviceList []map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&deviceList); err != nil {
-		respondBadRequest(w, "无效的请求格式")
-		return
-	}
-
-	added, failed, errors := s.onvifManager.ImportDevices(deviceList)
-
-	respondRaw(w, http.StatusOK, map[string]interface{}{
-		"success":     true,
-		"message":     fmt.Sprintf("导入完成：成功 %d 个，失败 %d 个", added, failed),
-		"addedCount":  added,
-		"failedCount": failed,
-		"errors":      errors,
-	})
-}
-
-// handleGetVideoEncoderConfigs 获取ONVIF设备视频编码配置
-func (s *Server) handleGetVideoEncoderConfigs(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
-	profileToken := r.URL.Query().Get("profileToken")
-
-	if profileToken == "" {
-		respondBadRequest(w, "profileToken 不能为空")
-		return
-	}
-
-	configs, err := s.onvifManager.GetVideoEncoderConfigurations(deviceID, profileToken)
-	if err != nil {
-		respondInternalError(w, fmt.Sprintf("获取视频编码配置失败: %s", err.Error()))
-		return
-	}
-
-	respondRaw(w, http.StatusOK, map[string]interface{}{
-		"configs": configs,
-	})
 }
 
 // respondOK 简化的 200 成功响应

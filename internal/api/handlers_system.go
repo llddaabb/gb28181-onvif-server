@@ -48,15 +48,27 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// GB28181 和 ONVIF 服务状态
+	gb28181Status := "stopped"
+	if s.gb28181Running {
+		gb28181Status = "running"
+	}
+	onvifStatus := "stopped"
+	if s.onvifRunning {
+		onvifStatus = "running"
+	}
+
 	response := map[string]interface{}{
 		"status": "running",
 		"servers": map[string]interface{}{
 			"gb28181": map[string]interface{}{
-				"status":  "running",
+				"status":  gb28181Status,
+				"enabled": s.gb28181Running,
 				"devices": len(gb28181Devices),
 			},
 			"onvif": map[string]interface{}{
-				"status":  "running",
+				"status":  onvifStatus,
+				"enabled": s.onvifRunning,
 				"devices": len(onvifDevices),
 			},
 			"zlm": map[string]interface{}{
@@ -332,4 +344,103 @@ func getCPUUsage() int {
 // decodeJSON 解析JSON请求体
 func decodeJSON(r *http.Request, v interface{}) error {
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// handleGetServiceStatus 获取服务状态
+func (s *Server) handleGetServiceStatus(w http.ResponseWriter, r *http.Request) {
+	response := map[string]interface{}{
+		"gb28181": map[string]interface{}{
+			"enabled": s.gb28181Running,
+			"status":  map[bool]string{true: "running", false: "stopped"}[s.gb28181Running],
+		},
+		"onvif": map[string]interface{}{
+			"enabled": s.onvifRunning,
+			"status":  map[bool]string{true: "running", false: "stopped"}[s.onvifRunning],
+		},
+	}
+	respondRaw(w, http.StatusOK, response)
+}
+
+// handleControlGB28181Service 控制GB28181服务
+func (s *Server) handleControlGB28181Service(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"` // start 或 stop
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondBadRequest(w, "无效的请求参数")
+		return
+	}
+
+	switch req.Action {
+	case "start":
+		if s.gb28181Running {
+			respondSuccessMsg(w, "GB28181服务已在运行中")
+			return
+		}
+		if err := s.gb28181Server.Start(); err != nil {
+			respondInternalError(w, fmt.Sprintf("启动GB28181服务失败: %v", err))
+			return
+		}
+		s.gb28181Running = true
+		debug.Info("api", "GB28181服务已启动")
+		respondSuccessMsg(w, "GB28181服务已启动")
+
+	case "stop":
+		if !s.gb28181Running {
+			respondSuccessMsg(w, "GB28181服务已停止")
+			return
+		}
+		if err := s.gb28181Server.Stop(); err != nil {
+			respondInternalError(w, fmt.Sprintf("停止GB28181服务失败: %v", err))
+			return
+		}
+		s.gb28181Running = false
+		debug.Info("api", "GB28181服务已停止")
+		respondSuccessMsg(w, "GB28181服务已停止")
+
+	default:
+		respondBadRequest(w, "无效的操作，请使用 start 或 stop")
+	}
+}
+
+// handleControlONVIFService 控制ONVIF服务
+func (s *Server) handleControlONVIFService(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"` // start 或 stop
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondBadRequest(w, "无效的请求参数")
+		return
+	}
+
+	switch req.Action {
+	case "start":
+		if s.onvifRunning {
+			respondSuccessMsg(w, "ONVIF服务已在运行中")
+			return
+		}
+		if err := s.onvifManager.Start(); err != nil {
+			respondInternalError(w, fmt.Sprintf("启动ONVIF服务失败: %v", err))
+			return
+		}
+		s.onvifRunning = true
+		debug.Info("api", "ONVIF服务已启动")
+		respondSuccessMsg(w, "ONVIF服务已启动")
+
+	case "stop":
+		if !s.onvifRunning {
+			respondSuccessMsg(w, "ONVIF服务已停止")
+			return
+		}
+		if err := s.onvifManager.Stop(); err != nil {
+			respondInternalError(w, fmt.Sprintf("停止ONVIF服务失败: %v", err))
+			return
+		}
+		s.onvifRunning = false
+		debug.Info("api", "ONVIF服务已停止")
+		respondSuccessMsg(w, "ONVIF服务已停止")
+
+	default:
+		respondBadRequest(w, "无效的操作，请使用 start 或 stop")
+	}
 }

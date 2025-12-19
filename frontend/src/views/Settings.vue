@@ -22,6 +22,14 @@
             <div class="section-header">
               <el-icon><VideoCamera /></el-icon>
               <span>GB28181 配置</span>
+              <el-switch
+                v-model="serviceStatus.gb28181"
+                :loading="serviceLoading.gb28181"
+                active-text="运行中"
+                inactive-text="已停止"
+                style="margin-left: auto;"
+                @change="toggleGB28181Service"
+              />
             </div>
           </template>
           <el-form :model="config.GB28181" label-width="120px" size="small">
@@ -78,6 +86,14 @@
             <div class="section-header">
               <el-icon><Monitor /></el-icon>
               <span>ONVIF 配置</span>
+              <el-switch
+                v-model="serviceStatus.onvif"
+                :loading="serviceLoading.onvif"
+                active-text="运行中"
+                inactive-text="已停止"
+                style="margin-left: auto;"
+                @change="toggleONVIFService"
+              />
             </div>
           </template>
           <el-form :model="config.ONVIF" label-width="120px" size="small">
@@ -788,6 +804,17 @@ const corsOrigins = computed({
   }
 })
 
+// 服务状态管理
+const serviceStatus = ref({
+  gb28181: true,
+  onvif: true
+})
+
+const serviceLoading = ref({
+  gb28181: false,
+  onvif: false
+})
+
 const message = ref<Message | null>(null)
 
 const showMessage = (type: Message['type'], text: string) => {
@@ -833,8 +860,77 @@ const saveSettings = async () => {
   }
 }
 
+// 加载服务状态
+const loadServiceStatus = async () => {
+  try {
+    const response = await fetch('/api/services/status')
+    if (response.ok) {
+      const data = await response.json()
+      serviceStatus.value.gb28181 = data.gb28181?.enabled ?? true
+      serviceStatus.value.onvif = data.onvif?.enabled ?? true
+    }
+  } catch (error) {
+    console.error('加载服务状态失败:', error)
+  }
+}
+
+// 切换 GB28181 服务
+const toggleGB28181Service = async (enabled: boolean) => {
+  serviceLoading.value.gb28181 = true
+  try {
+    const response = await fetch('/api/services/gb28181/control', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ action: enabled ? 'start' : 'stop' })
+    })
+    
+    if (response.ok) {
+      showMessage('success', `GB28181 服务已${enabled ? '启动' : '停止'}`)
+    } else {
+      const data = await response.json()
+      throw new Error(data.error || '操作失败')
+    }
+  } catch (error: any) {
+    showMessage('error', `操作失败: ${error.message}`)
+    // 回滚状态
+    serviceStatus.value.gb28181 = !enabled
+  } finally {
+    serviceLoading.value.gb28181 = false
+  }
+}
+
+// 切换 ONVIF 服务
+const toggleONVIFService = async (enabled: boolean) => {
+  serviceLoading.value.onvif = true
+  try {
+    const response = await fetch('/api/services/onvif/control', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ action: enabled ? 'start' : 'stop' })
+    })
+    
+    if (response.ok) {
+      showMessage('success', `ONVIF 服务已${enabled ? '启动' : '停止'}`)
+    } else {
+      const data = await response.json()
+      throw new Error(data.error || '操作失败')
+    }
+  } catch (error: any) {
+    showMessage('error', `操作失败: ${error.message}`)
+    // 回滚状态
+    serviceStatus.value.onvif = !enabled
+  } finally {
+    serviceLoading.value.onvif = false
+  }
+}
+
 onMounted(() => {
   loadSettings()
+  loadServiceStatus()
 })
 </script>
 

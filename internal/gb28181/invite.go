@@ -2,6 +2,7 @@ package gb28181
 
 import (
 	"fmt"
+	"gb28181-onvif-server/internal/debug"
 	"log"
 	"net"
 	"strconv"
@@ -158,7 +159,7 @@ func (s *Server) InviteRequest(deviceID, channelID string, rtpPort int, mediaIP 
 		}
 	}
 
-	log.Printf("[GB28181] INVITE 媒体IP最终决定: %s (设备IP: %s)", mediaIP, device.SipIP)
+	debug.Debug("gb28181", "INVITE 媒体IP决定: %s (设备IP: %s)", mediaIP, device.SipIP)
 
 	// 生成会话参数
 	callID := generateCallID()
@@ -189,8 +190,7 @@ func (s *Server) InviteRequest(deviceID, channelID string, rtpPort int, mediaIP 
 	// 构建 INVITE 消息，优先使用 mediaIP 作为本地 SIP 地址
 	inviteMsg := s.buildInviteMessage(device, channelID, callID, fromTag, sdp, mediaIP)
 
-	log.Printf("[GB28181] 发送 INVITE 请求: deviceID=%s, channelID=%s, rtpPort=%d, ssrc=%s, mediaIP=%s",
-		deviceID, channelID, rtpPort, ssrc, mediaIP)
+	debug.Info("gb28181", "INVITE: device=%s channel=%s rtp=%d ssrc=%s", deviceID, channelID, rtpPort, ssrc)
 
 	// 发送 INVITE
 	err = s.sendSIPMessageUDP(device, inviteMsg)
@@ -273,13 +273,11 @@ func (s *Server) sendSIPMessageUDP(device *Device, message string) error {
 		return fmt.Errorf("解析地址失败: %v", err)
 	}
 
-	// 使用现有的 UDP 连接发送
 	if s.udpConn != nil {
 		_, err = s.udpConn.WriteToUDP([]byte(message), udpAddr)
 		if err != nil {
 			return fmt.Errorf("UDP发送失败: %v", err)
 		}
-		log.Printf("[GB28181] ✓ INVITE 已发送到 %s", addr)
 		return nil
 	}
 
@@ -303,12 +301,12 @@ func (s *Server) ByeRequest(deviceID, channelID string) error {
 	// 构建 BYE 消息
 	byeMsg := s.buildByeMessage(device, session)
 
-	log.Printf("[GB28181] 发送 BYE 请求: deviceID=%s, channelID=%s", deviceID, channelID)
+	debug.Debug("gb28181", "BYE: device=%s channel=%s", deviceID, channelID)
 
 	// 发送 BYE
 	err := s.sendSIPMessageUDP(device, byeMsg)
 	if err != nil {
-		log.Printf("[GB28181] 发送 BYE 失败: %v", err)
+		debug.Warn("gb28181", "BYE发送失败: %v", err)
 	}
 
 	// 清理会话
@@ -361,12 +359,10 @@ func (s *Server) HandleInviteResponse(statusCode int, callID, toTag string) {
 			if statusCode == 200 {
 				session.Status = "playing"
 				session.StartTime = time.Now().Unix()
-				log.Printf("[GB28181] ✓ INVITE 成功: deviceID=%s, channelID=%s",
-					session.DeviceID, session.ChannelID)
+				log.Printf("[GB28181] ✓ INVITE成功: %s/%s", session.DeviceID, session.ChannelID)
 			} else {
 				session.Status = "failed"
-				log.Printf("[GB28181] ✗ INVITE 失败: statusCode=%d, deviceID=%s",
-					statusCode, session.DeviceID)
+				debug.Warn("gb28181", "INVITE失败: status=%d device=%s", statusCode, session.DeviceID)
 			}
 			return
 		}

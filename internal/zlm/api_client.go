@@ -86,9 +86,9 @@ func NewZLMAPIClient(baseURL string, opts ...ClientOption) *ZLMAPIClient {
 	client := &ZLMAPIClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 120 * time.Second,
 		},
-		timeout: 30 * time.Second,
+		timeout: 120 * time.Second,
 	}
 
 	// 应用选项

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"gb28181-onvif-server/internal/debug"
 	"log"
 	"net"
 	"strconv"
@@ -37,23 +38,30 @@ type CatalogDevices struct {
 	Devices []CatalogDevice `xml:"Item"`
 }
 
+// CatalogDeviceInfo 设备信息嵌套结构（用于解析Info标签内的字段）
+type CatalogDeviceInfo struct {
+	PTZType       int    `xml:"PTZType"`
+	DownloadSpeed string `xml:"DownloadSpeed"`
+}
+
 type CatalogDevice struct {
-	DeviceID     string `xml:"DeviceID"`
-	Name         string `xml:"Name"`
-	Manufacturer string `xml:"Manufacturer"`
-	Model        string `xml:"Model"`
-	Owner        string `xml:"Owner"`
-	CivilCode    string `xml:"CivilCode"`
-	Address      string `xml:"Address"`
-	Parental     int    `xml:"Parental"`
-	ParentID     string `xml:"ParentID"`
-	SafetyWay    int    `xml:"SafetyWay"`
-	RegisterWay  int    `xml:"RegisterWay"`
-	Secrecy      int    `xml:"Secrecy"`
-	Status       string `xml:"Status"`
-	Longitude    string `xml:"Longitude"`
-	Latitude     string `xml:"Latitude"`
-	PTZType      int    `xml:"PTZType"`
+	DeviceID     string            `xml:"DeviceID"`
+	Name         string            `xml:"Name"`
+	Manufacturer string            `xml:"Manufacturer"`
+	Model        string            `xml:"Model"`
+	Owner        string            `xml:"Owner"`
+	CivilCode    string            `xml:"CivilCode"`
+	Address      string            `xml:"Address"`
+	Parental     int               `xml:"Parental"`
+	ParentID     string            `xml:"ParentID"`
+	SafetyWay    int               `xml:"SafetyWay"`
+	RegisterWay  int               `xml:"RegisterWay"`
+	Secrecy      int               `xml:"Secrecy"`
+	Status       string            `xml:"Status"`
+	Longitude    string            `xml:"Longitude"`
+	Latitude     string            `xml:"Latitude"`
+	PTZType      int               `xml:"PTZType"` // 直接在Item下的PTZType（部分设备）
+	Info         CatalogDeviceInfo `xml:"Info"`    // 嵌套在Info标签内的PTZType（大华等设备）
 }
 
 // DeviceInfoResponse 设备信息响应结构
@@ -199,19 +207,19 @@ func (s *Server) HandleSIPMessage(conn net.Conn, data []byte) {
 	// 解析SIP消息
 	message, err := ParseSIPMessage(data)
 	if err != nil {
-		log.Printf("[ERROR] 解析SIP消息失败: %v", err)
+		debug.Warn("gb28181", "解析SIP消息失败: %v", err)
 		return
 	}
 
 	// 如果是响应，进行响应处理
 	if message.IsResponse {
-		log.Printf("[SIP] 收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, conn.RemoteAddr())
+		debug.Debug("gb28181", "收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, conn.RemoteAddr())
 		s.handleSIPResponse(conn, message)
 		return
 	}
 
 	// 根据请求类型进行处理
-	log.Printf("[SIP] 收到消息类型: %s 来自: %s", message.Type, conn.RemoteAddr())
+	debug.Debug("gb28181", "TCP SIP消息: 类型=%s 来自: %s", message.Type, conn.RemoteAddr())
 	switch message.Type {
 	case "REGISTER":
 		s.handleRegister(conn, message)
@@ -226,7 +234,7 @@ func (s *Server) HandleSIPMessage(conn net.Conn, data []byte) {
 	case "OPTIONS":
 		s.handleOptions(conn, message)
 	default:
-		log.Printf("[WARN] 未知的SIP消息类型: %s", message.Type)
+		debug.Warn("gb28181", "未知的SIP消息类型: %s", message.Type)
 	}
 }
 
@@ -235,24 +243,24 @@ func (s *Server) handleSIPResponse(conn net.Conn, response *SIPMessage) {
 	callID := response.Headers["Call-ID"]
 	cseq := response.Headers["CSeq"]
 
-	log.Printf("[SIP-Response] Call-ID: %s, CSeq: %s, Status: %d", callID, cseq, response.StatusCode)
+	debug.Debug("gb28181", "SIP-Response Call-ID: %s, CSeq: %s, Status: %d", callID, cseq, response.StatusCode)
 
 	// 对于 INVITE 的 2xx 响应，需要发送 ACK
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		// 这是对 INVITE 的成功响应，需要发送 ACK
 		if strings.Contains(cseq, "INVITE") {
-			log.Printf("[SIP-Response] 对INVITE响应 %d，发送ACK", response.StatusCode)
+			debug.Debug("gb28181", "对INVITE响应 %d，发送ACK", response.StatusCode)
 			s.sendACK(conn, response)
 		}
 	} else if response.StatusCode >= 300 && response.StatusCode < 400 {
 		// 3xx 重定向，暂不处理
-		log.Printf("[WARN] 收到重定向响应 %d: %s", response.StatusCode, response.Reason)
+		debug.Warn("gb28181", "收到重定向响应 %d: %s", response.StatusCode, response.Reason)
 	} else if response.StatusCode >= 400 {
 		// 4xx 或更高的错误
-		log.Printf("[WARN] 收到错误响应 %d: %s", response.StatusCode, response.Reason)
+		debug.Warn("gb28181", "收到错误响应 %d: %s", response.StatusCode, response.Reason)
 	} else if response.StatusCode >= 100 && response.StatusCode < 200 {
 		// 1xx 临时响应（如 180 Ringing, 183 Session Progress）
-		log.Printf("[SIP-Response] 临时响应 %d: %s", response.StatusCode, response.Reason)
+		debug.Debug("gb28181", "SIP临时响应 %d: %s", response.StatusCode, response.Reason)
 		// 可以选择发送 PRACK（Provisional Acknowledgement）但GB28181不要求
 	}
 }
@@ -268,7 +276,7 @@ func (s *Server) sendACK(conn net.Conn, response *SIPMessage) {
 	// 解析CSeq获取序列号
 	cseqParts := strings.Fields(cseq)
 	if len(cseqParts) < 2 {
-		log.Printf("[ERROR] 无效的CSeq头: %s", cseq)
+		debug.Warn("gb28181", "无效的CSeq头: %s", cseq)
 		return
 	}
 
@@ -282,7 +290,7 @@ func (s *Server) sendACK(conn net.Conn, response *SIPMessage) {
 	}
 
 	if requestURI == "" {
-		log.Printf("[ERROR] 无法从To/From头提取URI")
+		debug.Warn("gb28181", "无法从To/From头提取URI")
 		return
 	}
 
@@ -295,7 +303,7 @@ func (s *Server) sendACK(conn net.Conn, response *SIPMessage) {
 	ackMsg += fmt.Sprintf("CSeq: %s ACK\r\n", cseqParts[0])
 	ackMsg += "Content-Length: 0\r\n\r\n"
 
-	log.Printf("[ACK] 发送ACK: %s", requestURI)
+	debug.Debug("gb28181", "发送ACK: %s", requestURI)
 	conn.Write([]byte(ackMsg))
 }
 
@@ -327,7 +335,7 @@ func (s *Server) sendACKUDP(remoteAddr *net.UDPAddr, response *SIPMessage) {
 	// 解析CSeq获取序列号
 	cseqParts := strings.Fields(cseq)
 	if len(cseqParts) < 2 {
-		log.Printf("[ERROR] 无效的CSeq头: %s", cseq)
+		debug.Warn("gb28181", "UDP ACK无效的CSeq头: %s", cseq)
 		return
 	}
 
@@ -344,7 +352,6 @@ func (s *Server) sendACKUDP(remoteAddr *net.UDPAddr, response *SIPMessage) {
 	// 提取请求URI - 使用设备的地址
 	requestURI := extractSIPURI(from)
 	if requestURI == "" {
-		log.Printf("[ERROR] 无法从From头提取URI")
 		return
 	}
 
@@ -357,7 +364,7 @@ func (s *Server) sendACKUDP(remoteAddr *net.UDPAddr, response *SIPMessage) {
 	ackMsg += fmt.Sprintf("CSeq: %s ACK\r\n", cseqParts[0])
 	ackMsg += "Content-Length: 0\r\n\r\n"
 
-	log.Printf("[ACK-UDP] 通过UDP发送ACK: %s", requestURI)
+	debug.Debug("gb28181", "UDP发送ACK: %s", requestURI)
 	s.udpConn.WriteToUDP([]byte(ackMsg), remoteAddr)
 }
 
@@ -366,7 +373,7 @@ func (s *Server) handleRegister(conn net.Conn, message *SIPMessage) {
 	// 解析From头获取设备信息
 	fromHeader := message.Headers["From"]
 	if fromHeader == "" {
-		log.Println("REGISTER消息缺少From头")
+		debug.Warn("gb28181", "REGISTER消息缺少From头")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		conn.Write(response)
 		return
@@ -376,18 +383,15 @@ func (s *Server) handleRegister(conn net.Conn, message *SIPMessage) {
 	// From: <sip:34020000001320000001@3402000000>;tag=123456
 	deviceID := extractDeviceID(fromHeader)
 	if deviceID == "" {
-		log.Println("[WARN] 无法从From头提取设备ID")
+		debug.Warn("gb28181", "无法从From头提取设备ID")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		conn.Write(response)
 		return
 	}
 
-	log.Printf("[REGISTER] 设备ID: %s", deviceID)
-
 	// 认证检查
 	if !s.authenticateMessage(message) {
 		// 发送401未授权响应
-		log.Printf("[WARN] 设备 %s 认证失败", deviceID)
 		realm := s.config.Realm
 		response := []byte(fmt.Sprintf("SIP/2.0 401 Unauthorized\r\n"+"Via: %s\r\n"+"From: %s\r\n"+"To: %s\r\n"+"Call-ID: %s\r\n"+"CSeq: %s\r\n"+"WWW-Authenticate: Digest realm=\"%s\", nonce=\"%s\", algorithm=MD5\r\n"+"Content-Length: 0\r\n\r\n",
 			message.Headers["Via"],
@@ -405,7 +409,7 @@ func (s *Server) handleRegister(conn net.Conn, message *SIPMessage) {
 	// 解析Contact头获取设备IP和端口
 	contactHeader := message.Headers["Contact"]
 	if contactHeader == "" {
-		log.Println("[WARN] REGISTER消息缺少Contact头")
+		debug.Warn("gb28181", "REGISTER消息缺少Contact头")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		conn.Write(response)
 		return
@@ -413,13 +417,11 @@ func (s *Server) handleRegister(conn net.Conn, message *SIPMessage) {
 
 	ip, port := extractIPPortFromContact(contactHeader)
 	if ip == "" {
-		log.Println("[WARN] 无法从Contact头提取IP和端口")
+		debug.Warn("gb28181", "无法从Contact头提取IP和端口")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		conn.Write(response)
 		return
 	}
-
-	log.Printf("[REGISTER] 设备地址: %s:%d", ip, port)
 
 	// 解析Expires头
 	expires := 3600 // 默认3600秒
@@ -434,7 +436,6 @@ func (s *Server) handleRegister(conn net.Conn, message *SIPMessage) {
 	s.RegisterDevice(deviceID, "", ip, port, expires)
 
 	// 发送200 OK响应
-	log.Printf("[REGISTER] ✓ 设备 %s 注册成功，有效期: %d秒", deviceID, expires)
 	response := BuildSIPResponse(message, 200, "OK")
 	conn.Write(response)
 }
@@ -443,18 +444,14 @@ func (s *Server) handleRegister(conn net.Conn, message *SIPMessage) {
 func (s *Server) authenticateMessage(message *SIPMessage) bool {
 	// 如果配置中没有设置密码，则跳过认证
 	if s.config.Password == "" {
-		log.Println("[AUTH] 未配置密码，跳过认证")
 		return true
 	}
 
 	// 获取Authorization头
 	authHeader := message.Headers["Authorization"]
 	if authHeader == "" {
-		log.Println("[AUTH] 未找到Authorization头，需要认证")
 		return false
 	}
-
-	log.Printf("[AUTH] 收到Authorization头: %s", authHeader)
 
 	// 解析Authorization头
 	// Authorization: Digest username="34020000001320000001", realm="3402000000", nonce="123456", uri="sip:...", response="..."
@@ -463,44 +460,34 @@ func (s *Server) authenticateMessage(message *SIPMessage) bool {
 	// GB28181 使用设备ID作为用户名
 	username, ok := params["username"]
 	if !ok {
-		log.Println("[AUTH] Authorization头缺少username")
 		return false
 	}
-	log.Printf("[AUTH] 用户名(设备ID): %s", username)
 
 	realm, ok := params["realm"]
 	if !ok {
-		log.Println("[AUTH] Authorization头缺少realm")
 		return false
 	}
-	log.Printf("[AUTH] Realm: %s", realm)
 
 	nonce, ok := params["nonce"]
 	if !ok {
-		log.Println("[AUTH] Authorization头缺少nonce")
 		return false
 	}
 
 	// 验证 nonce 是否有效（是我们之前发送的）
 	if !isValidNonce(nonce) {
-		log.Printf("[AUTH] nonce 无效或已过期: %s", nonce)
+		debug.Warn("gb28181", "nonce 无效或已过期: %s", nonce)
 		return false
 	}
 
 	uri, ok := params["uri"]
 	if !ok {
-		log.Println("[AUTH] Authorization头缺少uri")
 		return false
 	}
 
 	response, ok := params["response"]
 	if !ok {
-		log.Println("[AUTH] Authorization头缺少response")
 		return false
 	}
-
-	log.Printf("[AUTH] 认证参数: nonce=%s, uri=%s", nonce, uri)
-	log.Printf("[AUTH] 客户端response: %s", response)
 
 	// 计算期望的响应值
 	// A1 = username:realm:password
@@ -520,13 +507,10 @@ func (s *Server) authenticateMessage(message *SIPMessage) bool {
 
 	// 比较计算出的响应值和客户端提供的响应值
 	if expectedResponseHex == response {
-		log.Println("[AUTH] ✓ 认证成功")
 		return true
 	}
 
-	log.Printf("[AUTH] ✗ 认证失败: 响应值不匹配")
-	log.Printf("[AUTH] A1=%s, md5(A1)=%s", A1, hex.EncodeToString(md5A1[:]))
-	log.Printf("[AUTH] A2=%s, md5(A2)=%s", A2, hex.EncodeToString(md5A2[:]))
+	debug.Warn("gb28181", "认证失败: 用户=%s, 响应值不匹配", username)
 	return false
 }
 
@@ -591,25 +575,23 @@ func (s *Server) handleInvite(conn net.Conn, message *SIPMessage) {
 	fromHeader := message.Headers["From"]
 	deviceID := extractDeviceID(fromHeader)
 	if deviceID == "" {
-		log.Println("[WARN] INVITE消息缺少有效设备ID")
+		debug.Warn("gb28181", "INVITE消息缺少有效设备ID")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		conn.Write(response)
 		return
 	}
 
-	log.Printf("[INVITE] 设备 %s 请求媒体流", deviceID)
+	debug.Debug("gb28181", "INVITE: 设备 %s 请求媒体流", deviceID)
 
 	// 这里需要处理媒体流协商（SDP）
 	// 简化处理，直接返回200 OK
 	response := BuildSIPResponse(message, 200, "OK")
 	conn.Write(response)
-	log.Printf("[INVITE] ✓ 已接受设备 %s 的媒体流请求", deviceID)
 }
 
 // handleAck 处理ACK请求
 func (s *Server) handleAck(conn net.Conn, message *SIPMessage) {
 	// ACK不需要响应
-	log.Printf("[ACK] 收到确认请求")
 }
 
 // handleBye 处理BYE请求（结束会话）
@@ -617,7 +599,6 @@ func (s *Server) handleBye(conn net.Conn, message *SIPMessage) {
 	// 发送200 OK响应
 	response := BuildSIPResponse(message, 200, "OK")
 	conn.Write(response)
-	log.Printf("[BYE] 会话已结束")
 }
 
 // handleMessage 处理MESSAGE请求（GB28181中的设备信息查询等）
@@ -625,7 +606,6 @@ func (s *Server) handleMessage(conn net.Conn, message *SIPMessage) {
 	// 简化处理，返回200 OK
 	response := BuildSIPResponse(message, 200, "OK")
 	conn.Write(response)
-	log.Printf("[MESSAGE] 设备消息请求已处理")
 }
 
 // handleOptions 处理OPTIONS请求
@@ -633,7 +613,6 @@ func (s *Server) handleOptions(conn net.Conn, message *SIPMessage) {
 	// 发送200 OK响应
 	response := BuildSIPResponse(message, 200, "OK")
 	conn.Write(response)
-	log.Printf("[OPTIONS] 收到心跳检测请求")
 }
 
 // extractDeviceID 从From头中提取设备ID
@@ -688,7 +667,7 @@ func (s *Server) handleRegisterUDP(remoteAddr *net.UDPAddr, message *SIPMessage)
 	// 解析From头获取设备信息
 	fromHeader := message.Headers["From"]
 	if fromHeader == "" {
-		log.Println("[WARN] UDP REGISTER消息缺少From头")
+		debug.Warn("gb28181", "UDP REGISTER消息缺少From头")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		s.udpConn.WriteToUDP(response, remoteAddr)
 		return
@@ -697,18 +676,15 @@ func (s *Server) handleRegisterUDP(remoteAddr *net.UDPAddr, message *SIPMessage)
 	// 从From头中提取设备ID
 	deviceID := extractDeviceID(fromHeader)
 	if deviceID == "" {
-		log.Println("[WARN] UDP 无法从From头提取设备ID")
+		debug.Warn("gb28181", "UDP 无法从From头提取设备ID")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		s.udpConn.WriteToUDP(response, remoteAddr)
 		return
 	}
 
-	log.Printf("[UDP-REGISTER] 设备ID: %s 来自: %s", deviceID, remoteAddr)
-
 	// 认证检查
 	if !s.authenticateMessage(message) {
 		// 发送401未授权响应
-		log.Printf("[UDP-REGISTER] 设备 %s 认证失败，发送401挑战", deviceID)
 		realm := s.config.Realm
 		response := []byte(fmt.Sprintf("SIP/2.0 401 Unauthorized\r\n"+
 			"Via: %s\r\n"+
@@ -743,8 +719,6 @@ func (s *Server) handleRegisterUDP(remoteAddr *net.UDPAddr, message *SIPMessage)
 		}
 	}
 
-	log.Printf("[UDP-REGISTER] 设备地址: %s:%d", ip, port)
-
 	// 解析Expires头
 	expires := 3600 // 默认3600秒
 	expiresHeader := message.Headers["Expires"]
@@ -758,7 +732,6 @@ func (s *Server) handleRegisterUDP(remoteAddr *net.UDPAddr, message *SIPMessage)
 	s.RegisterDevice(deviceID, "", ip, port, expires)
 
 	// 发送200 OK响应
-	log.Printf("[UDP-REGISTER] ✓ 设备 %s 注册成功，有效期: %d秒", deviceID, expires)
 	response := BuildSIPResponse(message, 200, "OK")
 	s.udpConn.WriteToUDP(response, remoteAddr)
 }
@@ -768,14 +741,6 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 	// 从 From 头提取设备ID
 	fromHeader := message.Headers["From"]
 	deviceID := extractDeviceID(fromHeader)
-
-	// 检查是否为心跳消息，心跳消息不输出详细日志
-	isKeepalive := len(message.Body) > 0 && strings.Contains(message.Body, "Keepalive")
-
-	if !isKeepalive {
-		log.Printf("[UDP-MESSAGE] 收到消息请求来自: %s", remoteAddr)
-		log.Printf("[UDP-MESSAGE] 设备ID: %s", deviceID)
-	}
 
 	// 发送200 OK响应
 	response := BuildSIPResponse(message, 200, "OK")
@@ -803,7 +768,7 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 			s.devicesMux.Lock()
 			s.devices[deviceID] = device
 			s.devicesMux.Unlock()
-			log.Printf("[UDP-MESSAGE] ✓ 设备 %s 自动注册成功 (通过MESSAGE)", deviceID)
+			log.Printf("[GB28181] ✓ 设备自动注册: %s", deviceID)
 
 			// 自动查询设备信息和目录
 			go func() {
@@ -816,23 +781,21 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 			// 设备已注册，更新心跳时间
 			s.UpdateKeepAlive(deviceID)
 		}
-	} // 解析消息体（可能是设备目录、状态等XML数据）
+	}
+
 	if len(message.Body) > 0 {
 		if strings.Contains(message.Body, "Keepalive") {
-			// 心跳消息，只记录简单日志，不打印消息体
+			// 心跳消息，只更新状态
 			if deviceID != "" {
 				s.UpdateKeepAlive(deviceID)
-				// 心跳日志仅在调试时显示
 			}
 		} else if strings.Contains(message.Body, "Catalog") && strings.Contains(message.Body, "Response") {
-			log.Printf("[UDP-MESSAGE] 收到设备目录响应")
 			s.parseCatalogResponse(deviceID, message.Body)
 		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
-			log.Printf("[UDP-MESSAGE] 收到设备信息响应")
 			s.parseDeviceInfoResponse(deviceID, message.Body)
 		} else {
-			// 其他消息类型，记录内容便于调试
-			log.Printf("[UDP-MESSAGE] 消息类型 (来自 %s):\n%s", deviceID, message.Body)
+			// 其他消息类型
+			debug.Debug("gb28181", "收到MESSAGE (设备 %s): %d字节", deviceID, len(message.Body))
 		}
 	}
 }
@@ -845,11 +808,11 @@ func (s *Server) parseCatalogResponse(deviceID string, body string) {
 
 	var catalog CatalogResponse
 	if err := xml.Unmarshal([]byte(body), &catalog); err != nil {
-		log.Printf("[GB28181] 解析目录响应失败: %v", err)
+		debug.Warn("gb28181", "解析目录响应失败: %v", err)
 		return
 	}
 
-	log.Printf("[GB28181] 目录响应: 设备=%s, 总数=%d, 本次=%d", catalog.DeviceID, catalog.SumNum, catalog.DeviceList.Num)
+	debug.Info("gb28181", "目录响应: 设备=%s, 总数=%d", catalog.DeviceID, catalog.SumNum)
 
 	// 使用响应中的设备ID（如果有）
 	if catalog.DeviceID != "" {
@@ -861,6 +824,15 @@ func (s *Server) parseCatalogResponse(deviceID string, body string) {
 		// 跳过非通道设备（如NVR本身）
 		// GB28181 通道ID 一般以 132 或 134 开头（摄像头或报警设备）
 		channelID := item.DeviceID
+
+		// 获取PTZType：优先使用Item.Info.PTZType（大华等设备），否则使用Item.PTZType
+		ptzType := item.PTZType
+		if ptzType == 0 && item.Info.PTZType > 0 {
+			ptzType = item.Info.PTZType
+		}
+
+		debug.Info("gb28181", "解析通道: ID=%s, Name=%s, PTZType=%d (item=%d, info=%d), Status=%s",
+			channelID, item.Name, ptzType, item.PTZType, item.Info.PTZType, item.Status)
 
 		// 判断是否是通道（通道ID后缀通常不同于设备ID）
 		if channelID == deviceID {
@@ -876,15 +848,17 @@ func (s *Server) parseCatalogResponse(deviceID string, body string) {
 			Manufacturer: item.Manufacturer,
 			Model:        item.Model,
 			Status:       item.Status,
-			PTZType:      item.PTZType,
+			PTZType:      ptzType,
 			Longitude:    item.Longitude,
 			Latitude:     item.Latitude,
 		}
 
 		// 添加到设备
 		s.AddChannel(deviceID, channel)
-		log.Printf("[GB28181] ✓ 解析通道: ID=%s, 名称=%s, 状态=%s, PTZ=%d",
-			channelID, item.Name, item.Status, item.PTZType)
+	}
+
+	if len(catalog.DeviceList.Devices) > 0 {
+		log.Printf("[GB28181] ✓ 解析 %d 个通道", len(catalog.DeviceList.Devices))
 	}
 }
 
@@ -896,7 +870,7 @@ func (s *Server) parseDeviceInfoResponse(deviceID string, body string) {
 
 	var info DeviceInfoResponse
 	if err := xml.Unmarshal([]byte(body), &info); err != nil {
-		log.Printf("[GB28181] 解析设备信息响应失败: %v", err)
+		debug.Warn("gb28181", "解析设备信息响应失败: %v", err)
 		return
 	}
 
@@ -914,8 +888,7 @@ func (s *Server) parseDeviceInfoResponse(deviceID string, body string) {
 	}
 	s.devicesMux.Unlock()
 
-	log.Printf("[GB28181] ✓ 设备信息更新: ID=%s, 名称=%s, 厂商=%s, 型号=%s, 通道数=%d",
-		deviceID, info.DeviceName, info.Manufacturer, info.Model, info.Channel)
+	debug.Debug("gb28181", "设备信息更新: ID=%s, 名称=%s, 厂商=%s", deviceID, info.DeviceName, info.Manufacturer)
 }
 
 // handleInviteUDP 处理 UDP INVITE 请求
@@ -923,25 +896,21 @@ func (s *Server) handleInviteUDP(remoteAddr *net.UDPAddr, message *SIPMessage) {
 	fromHeader := message.Headers["From"]
 	deviceID := extractDeviceID(fromHeader)
 	if deviceID == "" {
-		log.Println("[WARN] UDP INVITE消息缺少有效设备ID")
+		debug.Warn("gb28181", "UDP INVITE消息缺少有效设备ID")
 		response := BuildSIPResponse(message, 400, "Bad Request")
 		s.udpConn.WriteToUDP(response, remoteAddr)
 		return
 	}
 
-	log.Printf("[UDP-INVITE] 设备 %s 请求媒体流", deviceID)
-
 	// 简化处理，直接返回200 OK
 	response := BuildSIPResponse(message, 200, "OK")
 	s.udpConn.WriteToUDP(response, remoteAddr)
-	log.Printf("[UDP-INVITE] ✓ 已接受设备 %s 的媒体流请求", deviceID)
 }
 
 // handleByeUDP 处理 UDP BYE 请求
 func (s *Server) handleByeUDP(remoteAddr *net.UDPAddr, message *SIPMessage) {
 	response := BuildSIPResponse(message, 200, "OK")
 	s.udpConn.WriteToUDP(response, remoteAddr)
-	log.Printf("[UDP-BYE] 会话已结束: %s", remoteAddr)
 }
 
 // handleOptionsUDP 处理 UDP OPTIONS 请求（心跳）
@@ -949,25 +918,19 @@ func (s *Server) handleOptionsUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 	// 发送200 OK响应
 	response := BuildSIPResponse(message, 200, "OK")
 	s.udpConn.WriteToUDP(response, remoteAddr)
-	log.Printf("[UDP-OPTIONS] 收到心跳检测请求: %s", remoteAddr)
 }
 
 // handleSIPResponseUDP 处理 UDP SIP 响应消息
 func (s *Server) handleSIPResponseUDP(remoteAddr *net.UDPAddr, message *SIPMessage) {
-	log.Printf("[SIP-RESPONSE] 收到SIP响应来自: %s, 类型: %s", remoteAddr, message.Type)
-
 	// 从 From 头提取设备ID
 	fromHeader := message.Headers["From"]
 	deviceID := extractDeviceID(fromHeader)
 
 	// 解析消息体（可能是设备目录、状态等XML数据）
 	if len(message.Body) > 0 {
-		log.Printf("[SIP-RESPONSE] 消息体长度: %d", len(message.Body))
 		if strings.Contains(message.Body, "Catalog") && strings.Contains(message.Body, "Response") {
-			log.Printf("[SIP-RESPONSE] 收到设备目录响应")
 			s.parseCatalogResponse(deviceID, message.Body)
 		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
-			log.Printf("[SIP-RESPONSE] 收到设备信息响应")
 			s.parseDeviceInfoResponse(deviceID, message.Body)
 		}
 	}

@@ -15,15 +15,15 @@ import (
 
 // PreviewResult 返回给调用者的预览信息
 type PreviewResult struct {
-	DeviceID  string
-	ChannelID string
-	StreamID  string
-	RTPPort   int
-	SSRC      string
-	FlvURL    string
-	WsFlvURL  string
-	HlsURL    string
-	RtmpURL   string
+	DeviceID  string `json:"device_id"`
+	ChannelID string `json:"channel_id"`
+	StreamID  string `json:"stream_id"`
+	RTPPort   int    `json:"rtp_port"`
+	SSRC      string `json:"ssrc"`
+	FlvURL    string `json:"flv_url"`
+	WsFlvURL  string `json:"ws_flv_url"`
+	HlsURL    string `json:"hls_url"`
+	RtmpURL   string `json:"rtmp_url"`
 }
 
 // Manager 负责封装预览开始/停止的逻辑
@@ -210,15 +210,20 @@ func (m *Manager) StartRTSPProxy(deviceID, rtspURL, app, zlmHost string, httpPor
 	if rtspUser != "" || rtspPassword != "" {
 		opts := map[string]interface{}{
 			"rtp_type":    0,
-			"timeout_sec": 15,
-			"retry_count": 3,
+			"timeout_sec": 60,
+			"retry_count": 5,
 			"rtsp_user":   rtspUser,
 			"rtsp_pwd":    rtspPassword,
 		}
 		proxyInfo, err = zlmClient.AddStreamProxyWithOptions(rtspURL, app, streamID, opts)
 	} else {
-		// 首先尝试默认（tcp rtp_type）方式添加代理
-		proxyInfo, err = zlmClient.AddStreamProxy(rtspURL, app, streamID)
+		// 首先尝试默认（tcp rtp_type）方式添加代理，设置更长的超时时间
+		opts := map[string]interface{}{
+			"rtp_type":    0,
+			"timeout_sec": 60,
+			"retry_count": 5,
+		}
+		proxyInfo, err = zlmClient.AddStreamProxyWithOptions(rtspURL, app, streamID, opts)
 	}
 	if err != nil {
 		debug.Warn("preview", "AddStreamProxy default failed: %v, will try UDP fallback", err)
@@ -252,15 +257,15 @@ func (m *Manager) StartRTSPProxy(deviceID, rtspURL, app, zlmHost string, httpPor
 			return res, nil
 		}
 
-		// 回退：尝试使用 UDP rtp_type 并增加 retry_count
-		opts := map[string]interface{}{"rtp_type": 1, "retry_count": 5, "timeout_sec": 30}
+		// 回退：尝试使用 UDP rtp_type 并增加 retry_count 和 timeout
+		opts := map[string]interface{}{"rtp_type": 1, "retry_count": 10, "timeout_sec": 90}
 		if rtspUser != "" || rtspPassword != "" {
 			opts["rtsp_user"] = rtspUser
 			opts["rtsp_pwd"] = rtspPassword
 		}
 		proxyInfo, err = zlmClient.AddStreamProxyWithOptions(rtspURL, app, streamID, opts)
 		if err != nil {
-			return nil, fmt.Errorf("添加流代理失败: %w", err)
+			return nil, fmt.Errorf("添加流代理失败: %w\n\n生成的 URL: %s", err, rtspURL)
 		}
 	}
 
@@ -276,25 +281,48 @@ func (m *Manager) StartRTSPProxy(deviceID, rtspURL, app, zlmHost string, httpPor
 	// 可以在需要时把 proxyInfo.Key 返回给调用者
 	_ = proxyInfo
 
-	return res, nil
-}
-
-// StopRTSPProxy 停止 RTSP -> ZLM 的流代理（关闭 ZLM 流）
-func (m *Manager) StopRTSPProxy(deviceID, app string) error {
-	if m.zlm == nil || m.zlm.GetAPIClient() == nil {
-		return fmt.Errorf("zlm 未配置")
-	}
-
-	streamID := strings.ReplaceAll(deviceID, "-", "_")
-	streamID = strings.ReplaceAll(streamID, ":", "_")
-	streamID = strings.ReplaceAll(streamID, ".", "_")
-
-	client := m.zlm.GetAPIClient()
-	if client != nil {
-		if err := client.CloseStream(app, streamID); err != nil {
-			debug.Warn("preview", "关闭流失败: %v", err)
+	// 等待流就绪（最多等待 5 秒）
+	streamReady := false
+	for i := 0; i < 25; i++ { // 25 次 * 200ms = 5 秒
+		time.Sleep(200 * time.Millisecond)
+		online, err := zlmClient.IsStreamOnline(app, streamID)
+		if err == nil && online {
+			streamReady = true
+			debug.Info("preview", "流已就绪: %s/%s (等待 %dms)", app, streamID, (i+1)*200)
+			break
 		}
 	}
 
+	if !streamReady {
+		debug.Warn("preview", "流未能在 5 秒内就绪，但代理已添加: %s/%s", app, streamID)
+	}
+
+	// 检查是否需要转码（H.265 -> H.264）
+	go func(inURL, sid string) {
+		if strings.HasPrefix(strings.ToLower(inURL), "rtsp://") || strings.HasPrefix(strings.ToLower(inURL), "rtmp://") || strings.HasPrefix(strings.ToLower(inURL), "http://") {
+			codec, err := mediautil.DetectVideoCodec(inURL, 1500*time.Millisecond)
+			if err != nil {
+				debug.Info("preview", "probe codec failed for %s: %v", inURL, err)
+				return
+			}
+			if codec == "hevc" || strings.Contains(strings.ToLower(codec), "h265") {
+				rtmpTarget := fmt.Sprintf("rtmp://127.0.0.1:%d/%s/%s", rtmpPort, app, sid)
+				if err := mediautil.StartFFmpegTranscode(sid, app, inURL, rtmpTarget, "", 0); err != nil {
+					debug.Error("transcode", "启动转码失败: %v", err)
+				} else {
+					debug.Info("transcode", "已为代理流 %s 启动转码", sid)
+				}
+			}
+		}
+	}(rtspURL, streamID)
+
+	return res, nil
+}
+
+// StopRTSPProxy 停止 RTSP -> ZLM 的流代理
+// 注意：不再自动删除流，流会保留在媒体流管理中供后续使用
+func (m *Manager) StopRTSPProxy(deviceID, app string) error {
+	// 不删除流，让流保留在 ZLM 中
+	// 用户可以在媒体流管理页面手动删除流
 	return nil
 }
