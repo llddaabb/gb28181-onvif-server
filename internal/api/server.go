@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"gb28181-onvif-server/internal/ai"
+	"gb28181-onvif-server/internal/auth"
 	"gb28181-onvif-server/internal/config"
 	"gb28181-onvif-server/internal/debug"
 	"gb28181-onvif-server/internal/gb28181"
 	"gb28181-onvif-server/internal/onvif"
 	"gb28181-onvif-server/internal/preview"
+	"gb28181-onvif-server/internal/push"
 	"gb28181-onvif-server/internal/storage"
 	"gb28181-onvif-server/internal/zlm"
 
@@ -36,6 +38,10 @@ type Server struct {
 	zlmProcess         *zlm.ProcessManager
 	diskManager        *storage.DiskManager
 	aiManager          *ai.AIRecordingManager
+	pushManager        *push.Manager
+	authManager        *auth.AuthManager
+	authMiddleware     *auth.Middleware
+	authHandler        *auth.AuthHandler
 	server             *http.Server
 	configPath         string
 	channelManager     *ChannelManager
@@ -66,8 +72,37 @@ func NewServer(cfg *config.Config, gbServer *gb28181.Server, onvifMgr *onvif.Man
 	}
 	if zlmSrv != nil {
 		s.previewManager = preview.NewManager(gbServer, zlmSrv)
+		// 初始化推流管理器
+		s.pushManager = push.NewManager(zlmSrv.GetAPIClient(), "configs/push_targets.json", cfg.ZLM.HTTP.Port)
 	}
+
+	// 初始化认证模块
+	s.initAuth()
+
 	return s
+}
+
+// initAuth 初始化认证模块
+func (s *Server) initAuth() {
+	if s.config.Auth == nil {
+		return
+	}
+
+	// 转换配置
+	authConfig := &auth.AuthConfig{
+		Enable:          s.config.Auth.Enable,
+		JWTSecret:       s.config.Auth.JWTSecret,
+		TokenExpiry:     time.Duration(s.config.Auth.TokenExpiry) * time.Hour,
+		UsersFile:       s.config.Auth.UsersFile,
+		DefaultAdmin:    s.config.Auth.DefaultAdmin,
+		DefaultPassword: s.config.Auth.DefaultPassword,
+	}
+
+	s.authManager = auth.NewAuthManager(authConfig)
+	s.authMiddleware = auth.NewMiddleware(s.authManager)
+	s.authHandler = auth.NewAuthHandler(s.authManager)
+
+	debug.Info("api", "认证模块初始化完成，启用状态: %v", s.config.Auth.Enable)
 }
 
 // SetZLMProcess 设置 ZLM 进程管理器
@@ -122,19 +157,114 @@ func (s *Server) InitAIManager() error {
 		return nil
 	}
 
+	// 创建检测器配置
+	detectorConfig := ai.DetectorConfig{
+		ModelPath:    s.config.AI.ModelPath,
+		Backend:      "auto",
+		InputSize:    s.config.AI.InputSize,
+		Confidence:   s.config.AI.Confidence,
+		IoUThreshold: s.config.AI.IoUThreshold,
+		NumThreads:   s.config.AI.NumThreads,
+	}
+
+	// 设置默认值
+	if detectorConfig.InputSize == 0 {
+		detectorConfig.InputSize = 640
+	}
+	if detectorConfig.Confidence == 0 {
+		detectorConfig.Confidence = 0.5
+	}
+	if detectorConfig.IoUThreshold == 0 {
+		detectorConfig.IoUThreshold = 0.45
+	}
+
+	// 创建检测器
+	factoryConfig := ai.DetectorFactoryConfig{
+		Type:        ai.DetectorType(s.config.AI.DetectorType),
+		Config:      detectorConfig,
+		APIEndpoint: s.config.AI.APIEndpoint,
+	}
+
+	// 如果类型为空，使用 auto
+	if factoryConfig.Type == "" {
+		factoryConfig.Type = ai.DetectorTypeAuto
+	}
+
+	detector, err := ai.CreateDetector(factoryConfig)
+	if err != nil {
+		return fmt.Errorf("创建AI检测器失败: %w", err)
+	}
+
+	// 记录检测器信息
+	info := detector.GetModelInfo()
+	log.Printf("[AI] ✓ AI检测器已创建: name=%s, backend=%s", info.Name, info.Backend)
+
+	// 录像控制回调
 	recordControl := func(channelID string, start bool) error {
 		if start {
 			debug.Info("ai", "AI触发录像启动: channelID=%s", channelID)
+			// TODO: 调用实际的录像启动接口
 			return nil
 		} else {
 			debug.Info("ai", "AI触发录像停止: channelID=%s", channelID)
+			// TODO: 调用实际的录像停止接口
 			return nil
 		}
 	}
 
 	s.aiManager = ai.NewAIRecordingManager(recordControl)
+	s.aiManager.SetDetector(detector)
+	s.aiManager.SetConfig(s.config.AI)
+
 	debug.Info("api", "AI录像管理器已初始化")
+
+	// 如果配置了自动启动，则启动AI检测
+	if s.config.AI.AutoStart {
+		go s.autoStartAIDetection()
+	}
+
 	return nil
+}
+
+// autoStartAIDetection 自动启动AI检测
+func (s *Server) autoStartAIDetection() {
+	// 等待一段时间让其他服务启动
+	time.Sleep(3 * time.Second)
+
+	log.Println("[AI] 正在自动启动AI检测...")
+
+	// 获取要启动的通道列表
+	var channels []string
+	if len(s.config.AI.AutoChannels) > 0 {
+		// 使用配置的通道列表
+		channels = s.config.AI.AutoChannels
+	} else {
+		// 获取所有已配置的通道
+		allChannels := s.channelManager.GetChannels()
+		for _, ch := range allChannels {
+			if ch.StreamURL != "" {
+				channels = append(channels, ch.ChannelID)
+			}
+		}
+	}
+
+	if len(channels) == 0 {
+		log.Println("[AI] 没有可用的通道，等待通道配置后再启动AI检测")
+		return
+	}
+
+	// 启动各通道的AI检测
+	startedCount := 0
+	for _, channelID := range channels {
+		if err := s.aiManager.StartChannelRecording(channelID, ai.RecordingModePerson); err != nil {
+			log.Printf("[AI] 启动通道 %s 的AI检测失败: %v", channelID, err)
+		} else {
+			startedCount++
+			log.Printf("[AI] ✓ 通道 %s 的AI检测已启动", channelID)
+		}
+	}
+
+	log.Printf("[AI] ✓ 自动启动完成，共启动 %d 个通道的AI检测", startedCount)
 }
 
 // SyncGB28181Channel 同步GB28181通道到API通道管理器
@@ -163,6 +293,11 @@ func (s *Server) Start() error {
 
 	r.Use(s.corsMiddleware)
 	r.Use(s.loggingMiddleware)
+
+	// 添加认证中间件
+	if s.authMiddleware != nil {
+		r.Use(s.authMiddleware.Handler)
+	}
 
 	s.setupRoutes(r)
 
@@ -222,15 +357,22 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		allowedOrigins := s.config.API.CorsAllowOrigins
 		origin := r.Header.Get("Origin")
 
-		allowOrigin := ""
-		if len(allowedOrigins) == 0 || isAllowedOrigin(origin, allowedOrigins) {
+		allowOrigin := "*"
+		if origin != "" && len(allowedOrigins) > 0 && isAllowedOrigin(origin, allowedOrigins) {
 			allowOrigin = origin
 		}
-		// 如果没有匹配的源，则不设置 `Access-Control-Allow-Origin` 头，让浏览器执行其默认策略
+
 		w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		// OPTIONS 预检请求直接返回
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 
 		next.ServeHTTP(w, r)
 	})
@@ -309,6 +451,20 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	r.HandleFunc("/api/stats", s.handleGetStats).Methods("GET")
 	r.HandleFunc("/api/resources", s.handleGetResources).Methods("GET")
 	r.HandleFunc("/api/logs/latest", s.handleGetLatestLogs).Methods("GET")
+
+	// 认证API路由 - 直接使用完整路径以继承中间件
+	if s.authHandler != nil {
+		r.HandleFunc("/api/auth/login", s.authHandler.HandleLogin).Methods("POST", "OPTIONS")
+		r.HandleFunc("/api/auth/logout", s.authHandler.HandleLogout).Methods("POST", "OPTIONS")
+		r.HandleFunc("/api/auth/refresh", s.authHandler.HandleRefreshToken).Methods("POST", "OPTIONS")
+		r.HandleFunc("/api/auth/user", s.authHandler.HandleGetCurrentUser).Methods("GET", "OPTIONS")
+		r.HandleFunc("/api/auth/users", s.authHandler.HandleListUsers).Methods("GET", "OPTIONS")
+		r.HandleFunc("/api/auth/users", s.authHandler.HandleCreateUser).Methods("POST", "OPTIONS")
+		r.HandleFunc("/api/auth/users/update", s.authHandler.HandleUpdateUser).Methods("PUT", "OPTIONS")
+		r.HandleFunc("/api/auth/users/delete", s.authHandler.HandleDeleteUser).Methods("DELETE", "OPTIONS")
+		r.HandleFunc("/api/auth/password", s.authHandler.HandleChangePassword).Methods("PUT", "OPTIONS")
+		r.HandleFunc("/api/auth/validate", s.authHandler.HandleValidateToken).Methods("GET", "OPTIONS")
+	}
 
 	// 服务控制API
 	r.HandleFunc("/api/services/status", s.handleGetServiceStatus).Methods("GET")
@@ -423,6 +579,18 @@ func (s *Server) setupRoutes(r *mux.Router) {
 		zlmGroup.HandleFunc("/recording/{id}/start", s.handleZLMStartRecording).Methods("POST")
 		zlmGroup.HandleFunc("/recording/{id}/stop", s.handleZLMStopRecording).Methods("POST")
 	}
+
+	// 推流管理API
+	pushGroup := r.PathPrefix("/api/push").Subrouter()
+	pushGroup.HandleFunc("/platforms", s.handleGetPushPlatforms).Methods("GET")
+	pushGroup.HandleFunc("/targets", s.handleGetPushTargets).Methods("GET")
+	pushGroup.HandleFunc("/targets", s.handleAddPushTarget).Methods("POST")
+	pushGroup.HandleFunc("/targets/{id}", s.handleGetPushTarget).Methods("GET")
+	pushGroup.HandleFunc("/targets/{id}", s.handleUpdatePushTarget).Methods("PUT")
+	pushGroup.HandleFunc("/targets/{id}", s.handleDeletePushTarget).Methods("DELETE")
+	pushGroup.HandleFunc("/targets/{id}/start", s.handleStartPush).Methods("POST")
+	pushGroup.HandleFunc("/targets/{id}/stop", s.handleStopPush).Methods("POST")
+	pushGroup.HandleFunc("/channel/{channelId}", s.handleGetChannelPushTargets).Methods("GET")
 
 	// ZLM流代理 - 解决跨域问题
 	r.PathPrefix("/zlm/").HandlerFunc(s.handleZLMProxy)
@@ -656,4 +824,221 @@ func (s *Server) startPreview(r *http.Request, deviceID, channelID, rtspURL, app
 	// RtmpURL 已经在 preview.Manager 中生成
 
 	return res, nil
+}
+
+// ==================== 推流管理 API ====================
+
+// handleGetPushPlatforms 获取支持的直播平台列表
+func (s *Server) handleGetPushPlatforms(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	platforms := s.pushManager.GetPlatforms()
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"platforms": platforms,
+	})
+}
+
+// handleGetPushTargets 获取所有推流目标
+func (s *Server) handleGetPushTargets(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	targets := s.pushManager.GetTargets()
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"targets": targets,
+	})
+}
+
+// handleGetPushTarget 获取单个推流目标
+func (s *Server) handleGetPushTarget(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	target, err := s.pushManager.GetTarget(id)
+	if err != nil {
+		s.jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"target":  target,
+	})
+}
+
+// handleAddPushTarget 添加推流目标
+func (s *Server) handleAddPushTarget(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	var req struct {
+		Name        string `json:"name"`
+		Platform    string `json:"platform"`
+		PushURL     string `json:"push_url"`
+		StreamKey   string `json:"stream_key"`
+		ChannelID   string `json:"channel_id"`
+		ChannelName string `json:"channel_name"`
+		SourceURL   string `json:"source_url"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Name == "" || req.Platform == "" {
+		s.jsonError(w, http.StatusBadRequest, "Name and platform are required")
+		return
+	}
+
+	if req.SourceURL == "" && req.ChannelID == "" {
+		s.jsonError(w, http.StatusBadRequest, "Either source_url or channel_id is required")
+		return
+	}
+
+	target := &push.PushTarget{
+		Name:        req.Name,
+		Platform:    req.Platform,
+		PushURL:     req.PushURL,
+		StreamKey:   req.StreamKey,
+		ChannelID:   req.ChannelID,
+		ChannelName: req.ChannelName,
+		SourceURL:   req.SourceURL,
+	}
+
+	if err := s.pushManager.AddTarget(target); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"target":  target,
+		"message": "Push target added successfully",
+	})
+}
+
+// handleUpdatePushTarget 更新推流目标
+func (s *Server) handleUpdatePushTarget(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	var updates map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if err := s.pushManager.UpdateTarget(id, updates); err != nil {
+		s.jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Push target updated successfully",
+	})
+}
+
+// handleDeletePushTarget 删除推流目标
+func (s *Server) handleDeletePushTarget(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if err := s.pushManager.DeleteTarget(id); err != nil {
+		s.jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Push target deleted successfully",
+	})
+}
+
+// handleStartPush 开始推流
+func (s *Server) handleStartPush(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if err := s.pushManager.StartPush(id); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	target, _ := s.pushManager.GetTarget(id)
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"target":  target,
+		"message": "Push started successfully",
+	})
+}
+
+// handleStopPush 停止推流
+func (s *Server) handleStopPush(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if err := s.pushManager.StopPush(id); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	target, _ := s.pushManager.GetTarget(id)
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"target":  target,
+		"message": "Push stopped successfully",
+	})
+}
+
+// handleGetChannelPushTargets 获取通道的推流任务
+func (s *Server) handleGetChannelPushTargets(w http.ResponseWriter, r *http.Request) {
+	if s.pushManager == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "Push manager not initialized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	channelID := vars["channelId"]
+
+	targets := s.pushManager.GetTargetsByChannel(channelID)
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"targets": targets,
+	})
 }

@@ -5,24 +5,36 @@
 
 # 变量
 GO := go
-GOOS := linux
-GOARCH := amd64
+# 平台设置 (可通过命令行覆盖: make build GOOS=windows GOARCH=amd64)
+GOOS ?= $(shell go env GOOS)
+GOARCH ?= $(shell go env GOARCH)
 BUILD_DIR := build
 OUTPUT_DIR := dist
 SERVER_NAME := gb28181-server
 ZLM_EMBED_DIR := internal/zlm/embedded
 
+# 根据目标平台设置可执行文件后缀
+ifeq ($(GOOS),windows)
+    SERVER_EXT := .exe
+else
+    SERVER_EXT :=
+endif
+
 # 编译标志
 LDFLAGS := -s -w
 BUILD_TAGS := 
+
+# 平台标识文件
+ZLM_PLATFORM_FILE := $(ZLM_EMBED_DIR)/.platform
+CURRENT_PLATFORM := $(GOOS)-$(GOARCH)
 
 # 检查是否有嵌入式 ZLM
 ifneq ($(wildcard $(ZLM_EMBED_DIR)/MediaServer),)
     BUILD_TAGS := embed_zlm
 endif
 
-# 默认目标
-all: build
+# 默认目标（包含 ZLM）
+all: build-all
 
 # 完整构建（包含 ZLM）
 build-all: build-zlm build-server build-frontend
@@ -33,22 +45,53 @@ build: build-server
 	@echo "✓ 服务器构建完成"
 
 # 构建服务器
-build-server:
-	@echo ">>> 构建 Go 服务器..."
+build-server: check-zlm-platform
+	@echo ">>> 构建 Go 服务器 ($(GOOS)/$(GOARCH))..."
 	@mkdir -p $(OUTPUT_DIR)
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build \
 		-ldflags "$(LDFLAGS)" \
 		-tags "$(BUILD_TAGS)" \
-		-o $(OUTPUT_DIR)/$(SERVER_NAME) \
+		-o $(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT) \
 		./cmd/server
-	@echo "✓ 服务器构建完成: $(OUTPUT_DIR)/$(SERVER_NAME)"
+	@echo "✓ 服务器构建完成: $(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT)"
+
+# 检查 ZLM 平台一致性
+check-zlm-platform:
+	@if [ -f "$(ZLM_EMBED_DIR)/MediaServer" ]; then \
+		if [ -f "$(ZLM_PLATFORM_FILE)" ]; then \
+			SAVED_PLATFORM=$$(cat $(ZLM_PLATFORM_FILE)); \
+			if [ "$$SAVED_PLATFORM" != "$(CURRENT_PLATFORM)" ]; then \
+				echo "⚠ ZLM 平台不匹配: $$SAVED_PLATFORM != $(CURRENT_PLATFORM)"; \
+				echo ">>> 重新编译 ZLM for $(CURRENT_PLATFORM)..."; \
+				$(MAKE) build-zlm; \
+			else \
+				echo "✓ ZLM 平台匹配: $(CURRENT_PLATFORM)"; \
+			fi \
+		else \
+			ZLM_ARCH=$$(file $(ZLM_EMBED_DIR)/MediaServer | grep -o "x86-64\|x86_64\|aarch64\|ARM aarch64" | head -1); \
+			if [ "$(GOARCH)" = "amd64" ] && echo "$$ZLM_ARCH" | grep -q "x86"; then \
+				echo "✓ ZLM 平台检测: x86-64 (与 $(CURRENT_PLATFORM) 兼容)"; \
+				echo "$(CURRENT_PLATFORM)" > $(ZLM_PLATFORM_FILE); \
+			elif [ "$(GOARCH)" = "arm64" ] && echo "$$ZLM_ARCH" | grep -q "aarch64\|ARM"; then \
+				echo "✓ ZLM 平台检测: ARM64 (与 $(CURRENT_PLATFORM) 兼容)"; \
+				echo "$(CURRENT_PLATFORM)" > $(ZLM_PLATFORM_FILE); \
+			else \
+				echo "⚠ ZLM 平台可能不匹配 (ZLM: $$ZLM_ARCH, Target: $(CURRENT_PLATFORM))"; \
+				echo ">>> 重新编译 ZLM for $(CURRENT_PLATFORM)..."; \
+				$(MAKE) build-zlm; \
+			fi \
+		fi \
+	else \
+		echo "ℹ 未找到嵌入式 ZLM，跳过平台检查"; \
+	fi
 
 # 构建 ZLMediaKit
 build-zlm:
-	@echo ">>> 编译 ZLMediaKit..."
+	@echo ">>> 编译 ZLMediaKit for $(CURRENT_PLATFORM)..."
 	@chmod +x scripts/build_zlm.sh
 	@./scripts/build_zlm.sh all
-	@echo "✓ ZLMediaKit 编译完成"
+	@echo "$(CURRENT_PLATFORM)" > $(ZLM_PLATFORM_FILE)
+	@echo "✓ ZLMediaKit 编译完成 ($(CURRENT_PLATFORM))"
 
 # 只下载 ZLM 源码
 download-zlm:
@@ -61,15 +104,100 @@ build-frontend:
 	@cd frontend && npm install && npm run build
 	@echo "✓ 前端构建完成"
 
+# 跨平台编译快捷方式
+build-linux-amd64:
+	@$(MAKE) build-server GOOS=linux GOARCH=amd64
+
+build-linux-arm64:
+	@$(MAKE) build-server GOOS=linux GOARCH=arm64
+
+build-windows-amd64:
+	@$(MAKE) build-server GOOS=windows GOARCH=amd64
+
+build-darwin-amd64:
+	@$(MAKE) build-server GOOS=darwin GOARCH=amd64
+
+build-darwin-arm64:
+	@$(MAKE) build-server GOOS=darwin GOARCH=arm64
+
+# 编译所有平台
+build-all-platforms:
+	@echo ">>> 编译所有平台..."
+	@$(MAKE) build-linux-amd64
+	@$(MAKE) build-linux-arm64
+	@$(MAKE) build-windows-amd64
+	@$(MAKE) build-darwin-amd64
+	@$(MAKE) build-darwin-arm64
+	@echo "✓ 所有平台编译完成"
+
+# 打包发布 (当前平台)
+package: build-server build-frontend
+	@echo ">>> 打包发布版本..."
+	@mkdir -p $(OUTPUT_DIR)/release
+	@RELEASE_NAME=$(SERVER_NAME)-$(CURRENT_PLATFORM); \
+	RELEASE_DIR=$(OUTPUT_DIR)/release/$$RELEASE_NAME; \
+	rm -rf $$RELEASE_DIR && mkdir -p $$RELEASE_DIR; \
+	echo ">>> 复制服务器程序..."; \
+	cp $(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT) $$RELEASE_DIR/; \
+	echo ">>> 复制配置文件..."; \
+	mkdir -p $$RELEASE_DIR/configs; \
+	cp configs/config.yaml $$RELEASE_DIR/configs/; \
+	echo ">>> 复制前端文件..."; \
+	if [ -d "frontend/dist" ]; then \
+		cp -r frontend/dist $$RELEASE_DIR/www; \
+	fi; \
+	echo ">>> 复制启动脚本..."; \
+	cp start.sh $$RELEASE_DIR/ 2>/dev/null || true; \
+	cp quick_start.sh $$RELEASE_DIR/ 2>/dev/null || true; \
+	echo ">>> 复制文档..."; \
+	cp README.md $$RELEASE_DIR/ 2>/dev/null || true; \
+	echo ">>> 创建目录结构..."; \
+	mkdir -p $$RELEASE_DIR/logs $$RELEASE_DIR/recordings; \
+	echo ">>> 打包压缩..."; \
+	cd $(OUTPUT_DIR)/release && tar -czvf $$RELEASE_NAME.tar.gz $$RELEASE_NAME; \
+	echo "✓ 打包完成: $(OUTPUT_DIR)/release/$$RELEASE_NAME.tar.gz"
+
+# 打包发布 (包含嵌入式 ZLM)
+package-with-zlm: build-all
+	@echo ">>> 打包发布版本 (含 ZLM)..."
+	@mkdir -p $(OUTPUT_DIR)/release
+	@RELEASE_NAME=$(SERVER_NAME)-$(CURRENT_PLATFORM)-with-zlm; \
+	RELEASE_DIR=$(OUTPUT_DIR)/release/$$RELEASE_NAME; \
+	rm -rf $$RELEASE_DIR && mkdir -p $$RELEASE_DIR; \
+	echo ">>> 复制服务器程序..."; \
+	cp $(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT) $$RELEASE_DIR/; \
+	echo ">>> 复制配置文件..."; \
+	mkdir -p $$RELEASE_DIR/configs; \
+	cp configs/config.yaml $$RELEASE_DIR/configs/; \
+	echo ">>> 复制前端文件..."; \
+	if [ -d "frontend/dist" ]; then \
+		cp -r frontend/dist $$RELEASE_DIR/www; \
+	fi; \
+	echo ">>> 复制 ZLM 嵌入文件..."; \
+	if [ -d "$(ZLM_EMBED_DIR)" ]; then \
+		mkdir -p $$RELEASE_DIR/internal/zlm/embedded; \
+		cp -r $(ZLM_EMBED_DIR)/* $$RELEASE_DIR/internal/zlm/embedded/ 2>/dev/null || true; \
+	fi; \
+	echo ">>> 复制启动脚本..."; \
+	cp start.sh $$RELEASE_DIR/ 2>/dev/null || true; \
+	cp quick_start.sh $$RELEASE_DIR/ 2>/dev/null || true; \
+	echo ">>> 复制文档..."; \
+	cp README.md $$RELEASE_DIR/ 2>/dev/null || true; \
+	echo ">>> 创建目录结构..."; \
+	mkdir -p $$RELEASE_DIR/logs $$RELEASE_DIR/recordings; \
+	echo ">>> 打包压缩..."; \
+	cd $(OUTPUT_DIR)/release && tar -czvf $$RELEASE_NAME.tar.gz $$RELEASE_NAME; \
+	echo "✓ 打包完成: $(OUTPUT_DIR)/release/$$RELEASE_NAME.tar.gz"
+
 # 开发模式运行
 run: build-server
 	@echo ">>> 启动服务器..."
-	@$(OUTPUT_DIR)/$(SERVER_NAME) -config configs/config.yaml
+	@$(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT) -config configs/config.yaml
 
 # 开发模式（不启动 ZLM）
 run-no-zlm: build-server
 	@echo ">>> 启动服务器 (无 ZLM)..."
-	@$(OUTPUT_DIR)/$(SERVER_NAME) -config configs/config.yaml --no-zlm
+	@$(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT) -config configs/config.yaml --no-zlm
 
 # 测试
 test:
@@ -94,7 +222,7 @@ clean-all: clean
 	@echo ">>> 清理 ZLM 编译文件..."
 	@chmod +x scripts/build_zlm.sh 2>/dev/null || true
 	@./scripts/build_zlm.sh clean 2>/dev/null || true
-	@rm -rf $(ZLM_EMBED_DIR)/MediaServer $(ZLM_EMBED_DIR)/www $(ZLM_EMBED_DIR)/*.template
+	@rm -rf $(ZLM_EMBED_DIR)/MediaServer $(ZLM_EMBED_DIR)/www $(ZLM_EMBED_DIR)/*.template $(ZLM_PLATFORM_FILE)
 	@echo "✓ 深度清理完成"
 
 # 安装依赖
@@ -119,6 +247,9 @@ version:
 	else \
 		echo "ZLM 版本: 未编译"; \
 	fi
+	@if [ -f "$(ZLM_PLATFORM_FILE)" ]; then \
+		echo "ZLM 平台: $$(cat $(ZLM_PLATFORM_FILE))"; \
+	fi
 
 # 帮助
 help:
@@ -132,6 +263,13 @@ help:
 	@echo "  build-server  只构建 Go 服务器"
 	@echo "  build-zlm     编译 ZLMediaKit"
 	@echo "  build-frontend 构建前端"
+	@echo ""
+	@echo "跨平台编译:"
+	@echo "  make build GOOS=linux GOARCH=amd64    # Linux 64位"
+	@echo "  make build GOOS=linux GOARCH=arm64    # Linux ARM64"
+	@echo "  make build GOOS=windows GOARCH=amd64  # Windows 64位"
+	@echo "  make build GOOS=darwin GOARCH=amd64   # macOS Intel"
+	@echo "  make build GOOS=darwin GOARCH=arm64   # macOS Apple Silicon"
 	@echo ""
 	@echo "运行:"
 	@echo "  run           构建并运行服务器"

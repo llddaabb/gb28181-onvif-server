@@ -28,6 +28,6 @@ var WWWFiles embed.FS
 var Version string
 
 func init() {
-	// 当此文件被编译时，表示嵌入式资源可用
+	// 标记嵌入式 ZLM 已启用
 	EmbedEnabled = true
 }

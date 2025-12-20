@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	"gb28181-onvif-server/internal/config"
 	"gb28181-onvif-server/internal/debug"
 )
 
@@ -12,6 +13,8 @@ type AIRecordingManager struct {
 	recorders     map[string]*StreamRecorder
 	recordControl RecordControlFunc
 	defaultConfig DetectorConfig
+	detector      Detector
+	aiConfig      *config.AIConfig
 	mu            sync.RWMutex
 }
 
@@ -21,6 +24,59 @@ func NewAIRecordingManager(recordControl RecordControlFunc) *AIRecordingManager 
 		recorders:     make(map[string]*StreamRecorder),
 		recordControl: recordControl,
 		defaultConfig: DefaultDetectorConfig(),
+	}
+}
+
+// SetDetector 设置检测器
+func (m *AIRecordingManager) SetDetector(detector Detector) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.detector = detector
+}
+
+// SetConfig 设置AI配置
+func (m *AIRecordingManager) SetConfig(cfg *config.AIConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.aiConfig = cfg
+
+	// 更新检测器配置
+	if cfg != nil {
+		m.defaultConfig.Confidence = cfg.Confidence
+		m.defaultConfig.IoUThreshold = cfg.IoUThreshold
+		m.defaultConfig.InputSize = cfg.InputSize
+		m.defaultConfig.NumThreads = cfg.NumThreads
+		m.defaultConfig.ModelPath = cfg.ModelPath
+	}
+}
+
+// GetDetector 获取检测器
+func (m *AIRecordingManager) GetDetector() Detector {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.detector
+}
+
+// GetDetectorInfo 获取检测器信息
+func (m *AIRecordingManager) GetDetectorInfo() map[string]interface{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.detector == nil {
+		return map[string]interface{}{
+			"available": false,
+			"error":     "检测器未初始化",
+		}
+	}
+
+	info := m.detector.GetModelInfo()
+	return map[string]interface{}{
+		"available":    true,
+		"name":         info.Name,
+		"backend":      info.Backend,
+		"inputSize":    info.InputSize,
+		"confidence":   info.Confidence,
+		"iouThreshold": info.IoUThreshold,
 	}
 }
 

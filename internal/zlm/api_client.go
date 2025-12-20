@@ -831,3 +831,165 @@ func (c *ZLMAPIClient) IsRtpServerOnline(streamID string) (bool, int, string, er
 
 	return true, resp.Port, resp.SSRC, nil
 }
+
+// PushStreamInfo 推流信息
+type PushStreamInfo struct {
+	Key          string `json:"key"`            // 推流唯一标识
+	SrcURL       string `json:"src_url"`        // 源流地址
+	DstURL       string `json:"dst_url"`        // 目标推流地址
+	TimeoutMS    int    `json:"timeout_ms"`     // 超时时间(毫秒)
+	EnableHLS    bool   `json:"enable_hls"`     // 是否转HLS
+	EnableMP4    bool   `json:"enable_mp4"`     // 是否录制MP4
+	EnableRTSP   bool   `json:"enable_rtsp"`    // 是否转RTSP
+	EnableRTMP   bool   `json:"enable_rtmp"`    // 是否转RTMP
+	AddMuteAudio bool   `json:"add_mute_audio"` // 是否添加静音音轨
+}
+
+// PushStreamResult 推流结果
+type PushStreamResult struct {
+	Key  string `json:"key"`  // 推流唯一标识
+	Code int    `json:"code"` // 0=成功
+	Msg  string `json:"msg"`  // 消息
+}
+
+// AddFFmpegSource 添加 FFmpeg 拉流代理（用于推流）
+// 使用 FFmpeg 拉取源流并推送到目标地址
+func (c *ZLMAPIClient) AddFFmpegSource(srcURL, dstURL string, timeoutMS int, enableAudio bool) (*PushStreamResult, error) {
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Key  string `json:"key"`
+	}
+
+	params := map[string]interface{}{
+		"src_url":        srcURL,
+		"dst_url":        dstURL,
+		"timeout_ms":     timeoutMS,
+		"enable_hls":     false,
+		"enable_mp4":     false,
+		"add_mute_audio": enableAudio,
+	}
+
+	err := c.doRequest("GET", "/index/api/addFFmpegSource", params, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Code != 0 {
+		return nil, fmt.Errorf("add ffmpeg source failed: %s", resp.Msg)
+	}
+
+	return &PushStreamResult{
+		Key:  resp.Key,
+		Code: resp.Code,
+		Msg:  resp.Msg,
+	}, nil
+}
+
+// DelFFmpegSource 删除 FFmpeg 推流
+func (c *ZLMAPIClient) DelFFmpegSource(key string) error {
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+
+	params := map[string]interface{}{
+		"key": key,
+	}
+
+	err := c.doRequest("GET", "/index/api/delFFmpegSource", params, &resp)
+	if err != nil {
+		return err
+	}
+
+	if resp.Code != 0 {
+		return fmt.Errorf("delete ffmpeg source failed: %s", resp.Msg)
+	}
+
+	return nil
+}
+
+// ListFFmpegSource 列出所有 FFmpeg 推流任务
+func (c *ZLMAPIClient) ListFFmpegSource() ([]map[string]interface{}, error) {
+	var resp struct {
+		Code int                      `json:"code"`
+		Msg  string                   `json:"msg"`
+		Data []map[string]interface{} `json:"data"`
+	}
+
+	err := c.doRequest("GET", "/index/api/listFFmpegSource", nil, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Code != 0 {
+		return nil, fmt.Errorf("list ffmpeg source failed: %s", resp.Msg)
+	}
+
+	return resp.Data, nil
+}
+
+// StartSendRtp 开始 RTP 推流（GB28181 方式）
+// app: 应用名, stream: 流名, ssrc: RTP的SSRC, dstURL: 目标地址, dstPort: 目标端口
+// isUDP: 是否使用UDP, srcPort: 本地端口(可选)
+func (c *ZLMAPIClient) StartSendRtp(app, stream, ssrc, dstURL string, dstPort int, isUDP bool, srcPort int) error {
+	var resp struct {
+		Code      int    `json:"code"`
+		Msg       string `json:"msg"`
+		LocalPort int    `json:"local_port"`
+	}
+
+	params := map[string]interface{}{
+		"vhost":    "__defaultVhost__",
+		"app":      app,
+		"stream":   stream,
+		"ssrc":     ssrc,
+		"dst_url":  dstURL,
+		"dst_port": dstPort,
+		"is_udp":   isUDP,
+	}
+
+	if srcPort > 0 {
+		params["src_port"] = srcPort
+	}
+
+	err := c.doRequest("GET", "/index/api/startSendRtp", params, &resp)
+	if err != nil {
+		return err
+	}
+
+	if resp.Code != 0 {
+		return fmt.Errorf("start send rtp failed: %s", resp.Msg)
+	}
+
+	return nil
+}
+
+// StopSendRtp 停止 RTP 推流
+func (c *ZLMAPIClient) StopSendRtp(app, stream, ssrc string) error {
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+
+	params := map[string]interface{}{
+		"vhost":  "__defaultVhost__",
+		"app":    app,
+		"stream": stream,
+	}
+
+	if ssrc != "" {
+		params["ssrc"] = ssrc
+	}
+
+	err := c.doRequest("GET", "/index/api/stopSendRtp", params, &resp)
+	if err != nil {
+		return err
+	}
+
+	if resp.Code != 0 {
+		return fmt.Errorf("stop send rtp failed: %s", resp.Msg)
+	}
+
+	return nil
+}

@@ -204,32 +204,126 @@ func (s *Server) handleGetLatestLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleGetConfig 获取配置
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	// 返回安全的配置信息（不含敏感数据）
+	// 返回完整的配置信息
 	config := map[string]interface{}{
-		"gb28181": map[string]interface{}{
-			"sipIP":             s.config.GB28181.SipIP,
-			"sipPort":           s.config.GB28181.SipPort,
-			"realm":             s.config.GB28181.Realm,
-			"serverID":          s.config.GB28181.ServerID,
-			"heartbeatInterval": s.config.GB28181.HeartbeatInterval,
-			"registerExpires":   s.config.GB28181.RegisterExpires,
+		"GB28181": map[string]interface{}{
+			"SipIP":             s.config.GB28181.SipIP,
+			"SipPort":           s.config.GB28181.SipPort,
+			"Realm":             s.config.GB28181.Realm,
+			"ServerID":          s.config.GB28181.ServerID,
+			"Password":          "", // 不返回密码
+			"HeartbeatInterval": s.config.GB28181.HeartbeatInterval,
+			"RegisterExpires":   s.config.GB28181.RegisterExpires,
 		},
-		"api": map[string]interface{}{
-			"host": s.config.API.Host,
-			"port": s.config.API.Port,
+		"API": map[string]interface{}{
+			"Host":             s.config.API.Host,
+			"Port":             s.config.API.Port,
+			"CorsAllowOrigins": s.config.API.CorsAllowOrigins,
 		},
 	}
 
 	if s.config.ONVIF != nil {
-		config["onvif"] = map[string]interface{}{
-			"checkInterval": s.config.ONVIF.CheckInterval,
+		config["ONVIF"] = map[string]interface{}{
+			"CheckInterval":     s.config.ONVIF.CheckInterval,
+			"DiscoveryInterval": s.config.ONVIF.DiscoveryInterval,
+			"MediaPortRange":    s.config.ONVIF.MediaPortRange,
+			"EnableCheck":       s.config.ONVIF.EnableCheck,
 		}
 	}
 
-	respondRaw(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"config":  config,
-	})
+	if s.config.ZLM != nil {
+		zlmConfig := map[string]interface{}{
+			"UseEmbedded": s.config.ZLM.UseEmbedded,
+			"AutoRestart": s.config.ZLM.AutoRestart,
+			"MaxRestarts": s.config.ZLM.MaxRestarts,
+		}
+		if s.config.ZLM.API != nil {
+			zlmConfig["API"] = map[string]interface{}{
+				"Debug":       s.config.ZLM.API.Debug,
+				"Secret":      s.config.ZLM.API.Secret,
+				"SnapRoot":    s.config.ZLM.API.SnapRoot,
+				"DefaultSnap": s.config.ZLM.API.DefaultSnap,
+			}
+		}
+		if s.config.ZLM.HTTP != nil {
+			zlmConfig["HTTP"] = map[string]interface{}{
+				"Port":              s.config.ZLM.HTTP.Port,
+				"SSLPort":           s.config.ZLM.HTTP.SSLPort,
+				"RootPath":          s.config.ZLM.HTTP.RootPath,
+				"DirMenu":           s.config.ZLM.HTTP.DirMenu,
+				"AllowCrossDomains": s.config.ZLM.HTTP.AllowCrossDomains,
+			}
+		}
+		if s.config.ZLM.RTSP != nil {
+			zlmConfig["RTSP"] = map[string]interface{}{
+				"Port":        s.config.ZLM.RTSP.Port,
+				"SSLPort":     s.config.ZLM.RTSP.SSLPort,
+				"DirectProxy": s.config.ZLM.RTSP.DirectProxy,
+				"LowLatency":  s.config.ZLM.RTSP.LowLatency,
+				"AuthBasic":   s.config.ZLM.RTSP.AuthBasic,
+			}
+		}
+		if s.config.ZLM.RTMP != nil {
+			zlmConfig["RTMP"] = map[string]interface{}{
+				"Port":        s.config.ZLM.RTMP.Port,
+				"SSLPort":     s.config.ZLM.RTMP.SSLPort,
+				"DirectProxy": s.config.ZLM.RTMP.DirectProxy,
+			}
+		}
+		if s.config.ZLM.RTPProxy != nil {
+			zlmConfig["RTPProxy"] = map[string]interface{}{
+				"Port":       s.config.ZLM.RTPProxy.Port,
+				"TimeoutSec": s.config.ZLM.RTPProxy.TimeoutSec,
+				"PortRange":  s.config.ZLM.RTPProxy.PortRange,
+			}
+		}
+		if s.config.ZLM.Protocol != nil {
+			zlmConfig["Protocol"] = map[string]interface{}{
+				"EnableAudio":  s.config.ZLM.Protocol.EnableAudio,
+				"AddMuteAudio": s.config.ZLM.Protocol.AddMuteAudio,
+				"EnableHLS":    s.config.ZLM.Protocol.EnableHLS,
+				"EnableMP4":    s.config.ZLM.Protocol.EnableMP4,
+				"EnableRTSP":   s.config.ZLM.Protocol.EnableRTSP,
+				"EnableRTMP":   s.config.ZLM.Protocol.EnableRTMP,
+				"EnableTS":     s.config.ZLM.Protocol.EnableTS,
+				"EnableFMP4":   s.config.ZLM.Protocol.EnableFMP4,
+			}
+		}
+		if s.config.ZLM.Record != nil {
+			zlmConfig["Record"] = map[string]interface{}{
+				"RecordPath": s.config.ZLM.Record.RecordPath,
+				"AppName":    s.config.ZLM.Record.AppName,
+				"SampleMS":   s.config.ZLM.Record.SampleMS,
+				"FastStart":  s.config.ZLM.Record.FastStart,
+				"EnableFmp4": s.config.ZLM.Record.EnableFmp4,
+				"FileSecond": s.config.ZLM.Record.FileSecond,
+				"FileSizeMB": s.config.ZLM.Record.FileSizeMB,
+			}
+		}
+		if s.config.ZLM.RTC != nil {
+			zlmConfig["RTC"] = map[string]interface{}{
+				"Port":       s.config.ZLM.RTC.Port,
+				"TCPPort":    s.config.ZLM.RTC.TCPPort,
+				"TimeoutSec": s.config.ZLM.RTC.TimeoutSec,
+				"ExternIP":   s.config.ZLM.RTC.ExternIP,
+			}
+		}
+		config["ZLM"] = zlmConfig
+	}
+
+	if s.config.AI != nil {
+		config["AI"] = map[string]interface{}{
+			"Enable":         s.config.AI.Enable,
+			"APIEndpoint":    s.config.AI.APIEndpoint,
+			"ModelPath":      s.config.AI.ModelPath,
+			"Confidence":     s.config.AI.Confidence,
+			"DetectInterval": s.config.AI.DetectInterval,
+			"RecordDelay":    s.config.AI.RecordDelay,
+			"MinRecordTime":  s.config.AI.MinRecordTime,
+		}
+	}
+
+	respondRaw(w, http.StatusOK, config)
 }
 
 // handleUpdateConfig 更新配置

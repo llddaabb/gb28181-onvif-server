@@ -75,23 +75,36 @@ type DetectorPool struct {
 	pool      chan Detector
 	config    DetectorConfig
 	mu        sync.RWMutex
+
+	// 工厂配置
+	factoryConfig DetectorFactoryConfig
 }
 
 // NewDetectorPool 创建检测器池
 func NewDetectorPool(config DetectorConfig, poolSize int) (*DetectorPool, error) {
+	// 使用默认的自动选择类型
+	return NewDetectorPoolWithFactory(DetectorFactoryConfig{
+		Type:   DetectorTypeAuto,
+		Config: config,
+	}, poolSize)
+}
+
+// NewDetectorPoolWithFactory 使用工厂配置创建检测器池
+func NewDetectorPoolWithFactory(factoryConfig DetectorFactoryConfig, poolSize int) (*DetectorPool, error) {
 	if poolSize <= 0 {
 		poolSize = 1
 	}
 
 	pool := &DetectorPool{
-		detectors: make([]Detector, 0, poolSize),
-		pool:      make(chan Detector, poolSize),
-		config:    config,
+		detectors:     make([]Detector, 0, poolSize),
+		pool:          make(chan Detector, poolSize),
+		config:        factoryConfig.Config,
+		factoryConfig: factoryConfig,
 	}
 
 	// 创建检测器实例
 	for i := 0; i < poolSize; i++ {
-		detector, err := NewHTTPDetector(config, "") // 使用HTTP检测器
+		detector, err := CreateDetector(factoryConfig)
 		if err != nil {
 			// 清理已创建的检测器
 			pool.Close()

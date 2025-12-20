@@ -111,7 +111,7 @@
             <span class="stream-url">{{ row.streamUrl || '-' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="420" fixed="right">
+        <el-table-column label="操作" width="500" fixed="right">
           <template #default="{ row }">
             <el-button 
               type="primary" 
@@ -138,6 +138,14 @@
               :loading="row.aiRecordingLoading"
             >
               {{ row.aiRecording ? '停止AI录像' : 'AI录像' }}
+            </el-button>
+            <el-button 
+              type="success" 
+              link 
+              size="small" 
+              @click="showPushDialog(row)"
+            >
+              推流
             </el-button>
             <el-button 
               type="warning" 
@@ -256,6 +264,106 @@
         </div>
       </div>
     </el-dialog>
+
+    <!-- 推流到直播平台对话框 -->
+    <el-dialog v-model="pushDialogVisible" title="推流到直播平台" width="650px">
+      <div v-if="pushChannel">
+        <el-descriptions :column="2" border size="small" style="margin-bottom: 20px;">
+          <el-descriptions-item label="通道ID">{{ pushChannel.channelId }}</el-descriptions-item>
+          <el-descriptions-item label="通道名称">{{ pushChannel.channelName || pushChannel.name || '-' }}</el-descriptions-item>
+        </el-descriptions>
+
+        <!-- 已有推流任务列表 -->
+        <div v-if="channelPushTargets.length > 0" style="margin-bottom: 20px;">
+          <div style="font-weight: 600; margin-bottom: 10px;">当前推流任务</div>
+          <el-table :data="channelPushTargets" size="small" border>
+            <el-table-column prop="name" label="名称" width="120" />
+            <el-table-column prop="platform" label="平台" width="100">
+              <template #default="{ row }">
+                <el-tag size="small">{{ getPlatformLabel(row.platform) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="status" label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="row.status === 'pushing' ? 'success' : row.status === 'error' ? 'danger' : 'info'" size="small">
+                  {{ row.status === 'pushing' ? '推流中' : row.status === 'error' ? '错误' : '已停止' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="140">
+              <template #default="{ row }">
+                <el-button 
+                  v-if="row.status !== 'pushing'" 
+                  type="success" 
+                  link 
+                  size="small" 
+                  @click="startPush(row.id)"
+                  :loading="row.loading"
+                >
+                  开始
+                </el-button>
+                <el-button 
+                  v-else 
+                  type="danger" 
+                  link 
+                  size="small" 
+                  @click="stopPush(row.id)"
+                  :loading="row.loading"
+                >
+                  停止
+                </el-button>
+                <el-button 
+                  type="danger" 
+                  link 
+                  size="small" 
+                  @click="deletePushTarget(row.id)"
+                >
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+
+        <!-- 添加新推流任务 -->
+        <el-divider content-position="left">添加新推流任务</el-divider>
+        <el-form :model="newPushTarget" label-width="100px" size="default">
+          <el-form-item label="任务名称" required>
+            <el-input v-model="newPushTarget.name" placeholder="例如：抖音直播" />
+          </el-form-item>
+          <el-form-item label="直播平台" required>
+            <el-select v-model="newPushTarget.platform" placeholder="请选择直播平台" style="width: 100%;" @change="onPlatformChange">
+              <el-option 
+                v-for="platform in pushPlatforms" 
+                :key="platform.id" 
+                :label="platform.name" 
+                :value="platform.id"
+              >
+                <span>{{ platform.name }}</span>
+                <span style="color: #999; font-size: 12px; margin-left: 10px;">{{ platform.url_template }}</span>
+              </el-option>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="推流地址" required>
+            <el-input v-model="newPushTarget.pushUrl" placeholder="rtmp://live-push.xxx.com/live/">
+              <template #prepend v-if="selectedPlatformTemplate">
+                <el-tooltip :content="selectedPlatformTemplate" placement="top">
+                  <el-icon><InfoFilled /></el-icon>
+                </el-tooltip>
+              </template>
+            </el-input>
+          </el-form-item>
+          <el-form-item label="推流码" required>
+            <el-input v-model="newPushTarget.streamKey" placeholder="请输入推流码/串流密钥" show-password />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="addPushTarget" :loading="pushLoading">
+              添加推流任务
+            </el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -263,7 +371,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, WarningFilled } from '@element-plus/icons-vue'
+import { Plus, Refresh, WarningFilled, InfoFilled } from '@element-plus/icons-vue'
 import PreviewPlayer from '../components/PreviewPlayer.vue'
 
 interface Channel {
@@ -283,6 +391,29 @@ interface Device {
   id?: string
   name?: string
   status?: string
+}
+
+interface PushPlatform {
+  id: string
+  name: string
+  url_template: string
+}
+
+interface PushTarget {
+  id: string
+  name: string
+  platform: string
+  push_url: string
+  stream_key: string
+  channel_id: string
+  channel_name: string
+  source_url: string
+  status: string
+  zlm_key?: string
+  error?: string
+  created_at?: string
+  updated_at?: string
+  loading?: boolean
 }
 
 const channels = ref<Channel[]>([])
@@ -381,6 +512,25 @@ const previewInfo = reactive({
 
 // Preview player ref
 const previewPlayerRef = ref<any>(null)
+
+// 推流相关状态
+const pushDialogVisible = ref(false)
+const pushChannel = ref<Channel | null>(null)
+const pushPlatforms = ref<PushPlatform[]>([])
+const channelPushTargets = ref<PushTarget[]>([])
+const pushLoading = ref(false)
+const newPushTarget = ref({
+  name: '',
+  platform: '',
+  pushUrl: '',
+  streamKey: ''
+})
+
+// 获取选中平台的模板
+const selectedPlatformTemplate = computed(() => {
+  const platform = pushPlatforms.value.find(p => p.id === newPushTarget.value.platform)
+  return platform?.url_template || ''
+})
 
 // 定时刷新
 let refreshTimer: number | null = null
@@ -664,6 +814,206 @@ const copyStreamUrl = (channel: Channel) => {
   const url = `rtsp://${host}:8554/rtp/${channel.channelId}`
   copyUrl(url)
 }
+
+// ========== 推流相关方法 ==========
+
+// 获取推流平台列表
+const fetchPushPlatforms = async () => {
+  try {
+    const response = await fetch('/api/push/platforms')
+    const data = await response.json()
+    if (data.success && data.platforms) {
+      pushPlatforms.value = data.platforms
+    }
+  } catch (error) {
+    console.error('获取推流平台列表失败:', error)
+  }
+}
+
+// 获取通道的推流任务
+const fetchChannelPushTargets = async (channelId: string) => {
+  try {
+    const response = await fetch(`/api/push/channel/${encodeURIComponent(channelId)}`)
+    const data = await response.json()
+    if (data.success && data.targets) {
+      channelPushTargets.value = data.targets
+    } else {
+      channelPushTargets.value = []
+    }
+  } catch (error) {
+    console.error('获取通道推流任务失败:', error)
+    channelPushTargets.value = []
+  }
+}
+
+// 显示推流对话框
+const showPushDialog = async (channel: Channel) => {
+  pushChannel.value = channel
+  newPushTarget.value = {
+    name: '',
+    platform: '',
+    pushUrl: '',
+    streamKey: ''
+  }
+  pushDialogVisible.value = true
+  
+  // 加载平台列表和通道已有推流任务
+  await Promise.all([
+    fetchPushPlatforms(),
+    fetchChannelPushTargets(channel.channelId)
+  ])
+}
+
+// 平台选择变化时自动填充推流地址模板
+const onPlatformChange = (platformId: string) => {
+  const platform = pushPlatforms.value.find(p => p.id === platformId)
+  if (platform && platform.url_template) {
+    newPushTarget.value.pushUrl = platform.url_template
+  }
+}
+
+// 获取平台显示名称
+const getPlatformLabel = (platformId: string) => {
+  const platform = pushPlatforms.value.find(p => p.id === platformId)
+  return platform?.name || platformId
+}
+
+// 添加推流任务
+const addPushTarget = async () => {
+  if (!pushChannel.value) return
+  
+  if (!newPushTarget.value.name || !newPushTarget.value.platform || !newPushTarget.value.pushUrl || !newPushTarget.value.streamKey) {
+    ElMessage.warning('请填写完整的推流信息')
+    return
+  }
+  
+  pushLoading.value = true
+  try {
+    const host = window.location.hostname
+    // 构建源流地址 - 使用 RTSP 地址
+    const sourceUrl = pushChannel.value.streamUrl || `rtsp://${host}:8554/rtp/${pushChannel.value.channelId}`
+    
+    const response = await fetch('/api/push/targets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: newPushTarget.value.name,
+        platform: newPushTarget.value.platform,
+        push_url: newPushTarget.value.pushUrl,
+        stream_key: newPushTarget.value.streamKey,
+        channel_id: pushChannel.value.channelId,
+        channel_name: pushChannel.value.channelName || pushChannel.value.name || '',
+        source_url: sourceUrl
+      })
+    })
+    
+    const data = await response.json()
+    if (data.success) {
+      ElMessage.success('推流任务添加成功')
+      // 重置表单
+      newPushTarget.value = {
+        name: '',
+        platform: '',
+        pushUrl: '',
+        streamKey: ''
+      }
+      // 刷新任务列表
+      await fetchChannelPushTargets(pushChannel.value.channelId)
+    } else {
+      ElMessage.error(data.error || '添加推流任务失败')
+    }
+  } catch (error) {
+    console.error('添加推流任务失败:', error)
+    ElMessage.error('添加推流任务失败')
+  } finally {
+    pushLoading.value = false
+  }
+}
+
+// 开始推流
+const startPush = async (targetId: string) => {
+  const target = channelPushTargets.value.find(t => t.id === targetId)
+  if (target) target.loading = true
+  
+  try {
+    const response = await fetch(`/api/push/targets/${encodeURIComponent(targetId)}/start`, {
+      method: 'POST'
+    })
+    const data = await response.json()
+    if (data.success) {
+      ElMessage.success('推流已开始')
+      if (pushChannel.value) {
+        await fetchChannelPushTargets(pushChannel.value.channelId)
+      }
+    } else {
+      ElMessage.error(data.error || '开始推流失败')
+    }
+  } catch (error) {
+    console.error('开始推流失败:', error)
+    ElMessage.error('开始推流失败')
+  } finally {
+    if (target) target.loading = false
+  }
+}
+
+// 停止推流
+const stopPush = async (targetId: string) => {
+  const target = channelPushTargets.value.find(t => t.id === targetId)
+  if (target) target.loading = true
+  
+  try {
+    const response = await fetch(`/api/push/targets/${encodeURIComponent(targetId)}/stop`, {
+      method: 'POST'
+    })
+    const data = await response.json()
+    if (data.success) {
+      ElMessage.success('推流已停止')
+      if (pushChannel.value) {
+        await fetchChannelPushTargets(pushChannel.value.channelId)
+      }
+    } else {
+      ElMessage.error(data.error || '停止推流失败')
+    }
+  } catch (error) {
+    console.error('停止推流失败:', error)
+    ElMessage.error('停止推流失败')
+  } finally {
+    if (target) target.loading = false
+  }
+}
+
+// 删除推流任务
+const deletePushTarget = async (targetId: string) => {
+  try {
+    await ElMessageBox.confirm('确定删除该推流任务吗？', '确认删除', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  
+  try {
+    const response = await fetch(`/api/push/targets/${encodeURIComponent(targetId)}`, {
+      method: 'DELETE'
+    })
+    const data = await response.json()
+    if (data.success) {
+      ElMessage.success('推流任务已删除')
+      if (pushChannel.value) {
+        await fetchChannelPushTargets(pushChannel.value.channelId)
+      }
+    } else {
+      ElMessage.error(data.error || '删除推流任务失败')
+    }
+  } catch (error) {
+    console.error('删除推流任务失败:', error)
+    ElMessage.error('删除推流任务失败')
+  }
+}
+
+// ========== 推流方法结束 ==========
 
 onMounted(async () => {
   await fetchChannels()

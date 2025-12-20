@@ -22,8 +22,7 @@ downloadRoot=./www
 #FFmpeg可执行程序路径,支持相对路径/绝对路径
 bin=/usr/bin/ffmpeg
 #FFmpeg拉流再推流的命令模板，通过该模板可以设置再编码的一些参数
-# 使用示例命令将 H.265 转为 H.264，适用于浏览器播放的低延迟场景
-cmd=%s -rtsp_transport tcp -re -i %s -c:a aac -b:a 64k -c:v libx264 -preset veryfast -tune zerolatency -x264-params keyint=50 -f flv %s
+cmd=%s -re -i %s -c:a aac -strict -2 -ar 44100 -ab 48k -c:v libx264 -f flv %s
 #FFmpeg生成截图的命令，可以通过修改该配置改变截图分辨率或质量
 snap=%s -i %s -y -f mjpeg -frames:v 1 -an %s
 #FFmpeg日志的路径，如果置空则不生成FFmpeg日志

@@ -179,9 +179,24 @@ ZLM:
         MaxReqSize: 1024
 AI:
     Enable: true
-    APIEndpoint: http://localhost:8001/detect
-    ModelPath: ./models/yolov8s.onnx
-    Confidence: 0.5
-    DetectInterval: 2
-    RecordDelay: 10
-    MinRecordTime: 5
+    AutoStart: true                 # 启动时自动开始AI检测
+    DetectorType: http              # 检测器类型: auto(自动), http(外部服务), embedded(纯Go), onnx(ONNX Runtime)
+    APIEndpoint: http://localhost:8001/detect  # HTTP检测器API地址
+    ModelPath: ./models/yolov8s.onnx           # ONNX模型路径
+    Confidence: 0.5                 # 置信度阈值 (0.0-1.0)
+    IoUThreshold: 0.45              # NMS IoU阈值
+    InputSize: 640                  # 输入图像尺寸 (320/640/1280)
+    DetectInterval: 2               # 检测间隔(秒)
+    RecordDelay: 10                 # 录像延迟(秒)
+    MinRecordTime: 5                # 最小录像时长(秒)
+    NumThreads: 0                   # CPU线程数 (0=自动)
+    AutoChannels: []                # 自动启动AI的通道ID列表（空=全部已配置通道）
+
+# 认证配置
+Auth:
+    Enable: true                    # 是否启用认证
+    JWTSecret: ""                   # JWT密钥，为空时自动生成
+    TokenExpiry: 24                 # 令牌过期时间(小时)
+    UsersFile: configs/users.json   # 用户数据文件
+    DefaultAdmin: admin             # 默认管理员账户
+    DefaultPassword: admin123       # 默认管理员密码

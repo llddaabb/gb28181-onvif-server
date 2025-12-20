@@ -201,6 +201,7 @@ import {
   VideoPause, 
   RefreshRight
 } from '@element-plus/icons-vue'
+import axios from 'axios'
 
 const router = useRouter()
 
@@ -257,8 +258,8 @@ const formatUptime = (uptime: string): string => {
 const refreshStatus = async () => {
   loading.value = true
   try {
-    const response = await fetch('/api/zlm/status')
-    const data = await response.json()
+    const response = await axios.get('/api/zlm/status')
+    const data = response.data
     
     if (data.success) {
       if (data.process) {
@@ -282,7 +283,6 @@ const refreshStatus = async () => {
     }
   } catch (error) {
     console.error('获取ZLM状态失败:', error)
-    ElMessage.error('获取ZLM状态失败')
   } finally {
     loading.value = false
   }
@@ -292,8 +292,8 @@ const refreshStatus = async () => {
 const startProcess = async () => {
   actionLoading.value = 'start'
   try {
-    const response = await fetch('/api/zlm/process/start', { method: 'POST' })
-    const data = await response.json()
+    const response = await axios.post('/api/zlm/process/start')
+    const data = response.data
     
     if (data.success) {
       ElMessage.success(data.message || 'ZLM 启动成功')
@@ -301,9 +301,9 @@ const startProcess = async () => {
     } else {
       ElMessage.error(data.error || 'ZLM 启动失败')
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('启动ZLM失败:', error)
-    ElMessage.error('启动ZLM失败')
+    ElMessage.error(error.response?.data?.error || '启动ZLM失败')
   } finally {
     actionLoading.value = null
   }
@@ -323,8 +323,8 @@ const stopProcess = async () => {
 
   actionLoading.value = 'stop'
   try {
-    const response = await fetch('/api/zlm/process/stop', { method: 'POST' })
-    const data = await response.json()
+    const response = await axios.post('/api/zlm/process/stop')
+    const data = response.data
     
     if (data.success) {
       ElMessage.success(data.message || 'ZLM 已停止')
@@ -332,9 +332,9 @@ const stopProcess = async () => {
     } else {
       ElMessage.error(data.error || 'ZLM 停止失败')
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('停止ZLM失败:', error)
-    ElMessage.error('停止ZLM失败')
+    ElMessage.error(error.response?.data?.error || '停止ZLM失败')
   } finally {
     actionLoading.value = null
   }
@@ -354,8 +354,8 @@ const restartProcess = async () => {
 
   actionLoading.value = 'restart'
   try {
-    const response = await fetch('/api/zlm/process/restart', { method: 'POST' })
-    const data = await response.json()
+    const response = await axios.post('/api/zlm/process/restart')
+    const data = response.data
     
     if (data.success) {
       ElMessage.success(data.message || 'ZLM 重启成功')
@@ -363,9 +363,9 @@ const restartProcess = async () => {
     } else {
       ElMessage.error(data.error || 'ZLM 重启失败')
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('重启ZLM失败:', error)
-    ElMessage.error('重启ZLM失败')
+    ElMessage.error(error.response?.data?.error || '重启ZLM失败')
   } finally {
     actionLoading.value = null
   }

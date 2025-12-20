@@ -599,6 +599,7 @@ import {
   InfoFilled,
   VideoPlay
 } from '@element-plus/icons-vue'
+import { api } from '../lib/api'
 
 interface GB28181Config {
   SipIP: string
@@ -826,10 +827,37 @@ const showMessage = (type: Message['type'], text: string) => {
 
 const loadSettings = async () => {
   try {
-    const response = await fetch('/api/config')
+    const response = await api.get('/api/config')
     if (response.ok) {
       const data = await response.json()
-      config.value = data
+      // 深度合并配置，保留默认值
+      if (data.GB28181) {
+        config.value.GB28181 = { ...config.value.GB28181, ...data.GB28181 }
+      }
+      if (data.ONVIF) {
+        config.value.ONVIF = { ...config.value.ONVIF, ...data.ONVIF }
+      }
+      if (data.API) {
+        config.value.API = { ...config.value.API, ...data.API }
+      }
+      if (data.ZLM) {
+        config.value.ZLM = {
+          ...config.value.ZLM,
+          ...data.ZLM,
+          API: { ...config.value.ZLM.API, ...(data.ZLM.API || {}) },
+          HTTP: { ...config.value.ZLM.HTTP, ...(data.ZLM.HTTP || {}) },
+          RTSP: { ...config.value.ZLM.RTSP, ...(data.ZLM.RTSP || {}) },
+          RTMP: { ...config.value.ZLM.RTMP, ...(data.ZLM.RTMP || {}) },
+          RTPProxy: { ...config.value.ZLM.RTPProxy, ...(data.ZLM.RTPProxy || {}) },
+          Protocol: { ...config.value.ZLM.Protocol, ...(data.ZLM.Protocol || {}) },
+          Record: { ...config.value.ZLM.Record, ...(data.ZLM.Record || {}) },
+          RTC: { ...config.value.ZLM.RTC, ...(data.ZLM.RTC || {}) }
+        }
+      }
+      if (data.AI) {
+        config.value.AI = { ...config.value.AI, ...data.AI }
+      }
+      showMessage('success', '配置加载成功')
     } else {
       throw new Error('Failed to load settings')
     }
@@ -841,13 +869,7 @@ const loadSettings = async () => {
 
 const saveSettings = async () => {
   try {
-    const response = await fetch('/api/config', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(config.value)
-    })
+    const response = await api.put('/api/config', config.value)
     
     if (response.ok) {
       showMessage('success', '配置保存成功')
@@ -863,7 +885,7 @@ const saveSettings = async () => {
 // 加载服务状态
 const loadServiceStatus = async () => {
   try {
-    const response = await fetch('/api/services/status')
+    const response = await api.get('/api/services/status')
     if (response.ok) {
       const data = await response.json()
       serviceStatus.value.gb28181 = data.gb28181?.enabled ?? true
@@ -878,13 +900,7 @@ const loadServiceStatus = async () => {
 const toggleGB28181Service = async (enabled: boolean) => {
   serviceLoading.value.gb28181 = true
   try {
-    const response = await fetch('/api/services/gb28181/control', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ action: enabled ? 'start' : 'stop' })
-    })
+    const response = await api.post('/api/services/gb28181/control', { action: enabled ? 'start' : 'stop' })
     
     if (response.ok) {
       showMessage('success', `GB28181 服务已${enabled ? '启动' : '停止'}`)
@@ -905,13 +921,7 @@ const toggleGB28181Service = async (enabled: boolean) => {
 const toggleONVIFService = async (enabled: boolean) => {
   serviceLoading.value.onvif = true
   try {
-    const response = await fetch('/api/services/onvif/control', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ action: enabled ? 'start' : 'stop' })
-    })
+    const response = await api.post('/api/services/onvif/control', { action: enabled ? 'start' : 'stop' })
     
     if (response.ok) {
       showMessage('success', `ONVIF 服务已${enabled ? '启动' : '停止'}`)
@@ -927,6 +937,9 @@ const toggleONVIFService = async (enabled: boolean) => {
     serviceLoading.value.onvif = false
   }
 }
+
+
+
 
 onMounted(() => {
   loadSettings()

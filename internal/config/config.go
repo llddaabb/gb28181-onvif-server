@@ -271,13 +271,29 @@ type ZLMShellConfig struct {
 // Config 总配置结构体
 // AIConfig AI功能配置
 type AIConfig struct {
-	Enable         bool    `yaml:"Enable"`         // 是否启用AI功能
-	APIEndpoint    string  `yaml:"APIEndpoint"`    // AI检测API地址
-	ModelPath      string  `yaml:"ModelPath"`      // 本地模型路径（未使用HTTP API时）
-	Confidence     float32 `yaml:"Confidence"`     // 置信度阈值
-	DetectInterval int     `yaml:"DetectInterval"` // 检测间隔(秒)
-	RecordDelay    int     `yaml:"RecordDelay"`    // 录像延迟(秒)
-	MinRecordTime  int     `yaml:"MinRecordTime"`  // 最小录像时长(秒)
+	Enable         bool     `yaml:"Enable"`         // 是否启用AI功能
+	AutoStart      bool     `yaml:"AutoStart"`      // 启动时自动开始AI检测
+	DetectorType   string   `yaml:"DetectorType"`   // 检测器类型: auto, http, embedded, onnx
+	APIEndpoint    string   `yaml:"APIEndpoint"`    // AI检测API地址（HTTP类型）
+	ModelPath      string   `yaml:"ModelPath"`      // 本地模型路径（ONNX类型）
+	Confidence     float32  `yaml:"Confidence"`     // 置信度阈值
+	IoUThreshold   float32  `yaml:"IoUThreshold"`   // NMS IoU阈值
+	InputSize      int      `yaml:"InputSize"`      // 输入图像尺寸
+	DetectInterval int      `yaml:"DetectInterval"` // 检测间隔(秒)
+	RecordDelay    int      `yaml:"RecordDelay"`    // 录像延迟(秒)
+	MinRecordTime  int      `yaml:"MinRecordTime"`  // 最小录像时长(秒)
+	NumThreads     int      `yaml:"NumThreads"`     // CPU线程数（0=自动）
+	AutoChannels   []string `yaml:"AutoChannels"`   // 自动启动AI的通道ID列表（空=全部通道）
+}
+
+// AuthConfig 认证配置
+type AuthConfig struct {
+	Enable          bool   `yaml:"Enable"`          // 是否启用认证
+	JWTSecret       string `yaml:"JWTSecret"`       // JWT密钥
+	TokenExpiry     int    `yaml:"TokenExpiry"`     // 令牌过期时间(小时)
+	UsersFile       string `yaml:"UsersFile"`       // 用户数据文件
+	DefaultAdmin    string `yaml:"DefaultAdmin"`    // 默认管理员账户
+	DefaultPassword string `yaml:"DefaultPassword"` // 默认管理员密码
 }
 
 type Config struct {
@@ -287,6 +303,7 @@ type Config struct {
 	Debug   *DebugConfig   `yaml:"Debug"`
 	ZLM     *ZLMConfig     `yaml:"ZLM"`
 	AI      *AIConfig      `yaml:"AI"`
+	Auth    *AuthConfig    `yaml:"Auth"`
 }
 
 // Load 从文件加载配置
@@ -349,6 +366,17 @@ func Load(filePath string) (*Config, error) {
 			DetectInterval: 2,
 			RecordDelay:    10,
 			MinRecordTime:  5,
+		}
+	}
+
+	if config.Auth == nil {
+		config.Auth = &AuthConfig{
+			Enable:          true,
+			JWTSecret:       "", // 为空时自动生成
+			TokenExpiry:     24, // 24小时
+			UsersFile:       "configs/users.json",
+			DefaultAdmin:    "admin",
+			DefaultPassword: "admin123",
 		}
 	}
 

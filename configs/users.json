@@ -1,0 +1,22 @@
+[
+  {
+    "id": "2ee31c3010a3f972",
+    "username": "admin",
+    "password": "$2a$10$QWQczpFjVvTANYVJApVrGecX71H02i2sV7RSeblGJncOuuk9RZB.u",
+    "role": "admin",
+    "enabled": true,
+    "created_at": "2025-12-20T16:33:53.853304483+08:00",
+    "updated_at": "2025-12-20T20:42:46.387835518+08:00",
+    "last_login": "2025-12-20T21:26:51.309210504+08:00"
+  },
+  {
+    "id": "8eed0a5283c3eded",
+    "username": "test",
+    "password": "$2a$10$3GhFCPRoWavE/oiAq3RhU.doRPnoSlGoMgyjOu6x7ln4GLbDug4Ii",
+    "role": "viewer",
+    "enabled": true,
+    "created_at": "2025-12-20T20:44:15.005136416+08:00",
+    "updated_at": "2025-12-20T20:44:15.005136832+08:00",
+    "last_login": "2025-12-20T20:44:25.381605237+08:00"
+  }
+]
