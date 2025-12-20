@@ -1,3 +1,6 @@
+//go:build !cgo || test
+// +build !cgo test
+
 package ai
 
 import (

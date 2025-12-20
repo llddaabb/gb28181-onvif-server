@@ -596,9 +596,10 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	r.PathPrefix("/zlm/").HandlerFunc(s.handleZLMProxy)
 
 	// 静态文件服务（必须在最后）
-	staticDir := "frontend/dist"
+	staticDir := getStaticDir()
 	r.PathPrefix("/assets/").Handler(http.StripPrefix("/assets/", http.FileServer(http.Dir(staticDir+"/assets"))))
 	r.PathPrefix("/jessibuca/").Handler(http.StripPrefix("/jessibuca/", http.FileServer(http.Dir(staticDir+"/jessibuca"))))
+	r.PathPrefix("/h265webjs/").Handler(http.StripPrefix("/h265webjs/", http.FileServer(http.Dir(staticDir+"/h265webjs"))))
 	r.HandleFunc("/", s.handleServeStaticFile).Methods("GET")
 	r.HandleFunc("/{path:.*\\.html$}", s.handleServeStaticFile).Methods("GET")
 	r.PathPrefix("/").HandlerFunc(s.handleServeStaticFile).Methods("GET")
