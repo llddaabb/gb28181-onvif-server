@@ -172,12 +172,12 @@
               </el-col>
               <el-col :span="8">
                 <el-form-item label="置信度阈值">
-                  <el-slider 
+                    <el-slider 
                     v-model="config.AI.Confidence" 
                     :min="0" 
                     :max="1" 
                     :step="0.05"
-                    :format-tooltip="val => (val * 100).toFixed(0) + '%'"
+                    :format-tooltip="(val: number) => (val * 100).toFixed(0) + '%'"
                   />
                   <div class="form-tip">
                     越高越准确但可能漏检，建议0.5-0.7
