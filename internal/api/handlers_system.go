@@ -344,9 +344,17 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	respondSuccessMsg(w, "配置已更新")
 }
 
-// getStaticDir 获取静态文件目录，支持多种部署方式
-func getStaticDir() string {
-	// 优先检查的目录列表
+// getStaticDir 获取静态文件目录，优先使用配置，否则自动检测
+func (s *Server) getStaticDir() string {
+	// 优先使用配置中的路径
+	if s.config != nil && s.config.API != nil && s.config.API.StaticDir != "" {
+		staticDir := s.config.API.StaticDir
+		if info, err := os.Stat(staticDir); err == nil && info.IsDir() {
+			return staticDir
+		}
+	}
+
+	// 自动检测的目录列表
 	candidates := []string{
 		"www",           // 生产环境打包目录
 		"frontend/dist", // 开发环境目录
@@ -360,8 +368,11 @@ func getStaticDir() string {
 		}
 	}
 
-	// 默认返回开发环境路径
-	return "frontend/dist"
+	// 默认返回配置值或 www
+	if s.config != nil && s.config.API != nil && s.config.API.StaticDir != "" {
+		return s.config.API.StaticDir
+	}
+	return "www"
 }
 
 // handleServeStaticFile 提供静态文件
@@ -371,7 +382,7 @@ func (s *Server) handleServeStaticFile(w http.ResponseWriter, r *http.Request) {
 		path = "/index.html"
 	}
 
-	staticDir := getStaticDir()
+	staticDir := s.getStaticDir()
 	filePath := staticDir + path
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {

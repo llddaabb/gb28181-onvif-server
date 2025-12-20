@@ -15,6 +15,7 @@ ONVIF:
 API:
     Host: 0.0.0.0
     Port: 9080
+    StaticDir: www
     CorsAllowOrigins:
         - '*'
 Debug:

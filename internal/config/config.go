@@ -34,6 +34,7 @@ type APIConfig struct {
 	Host             string   `yaml:"Host"`
 	Port             int      `yaml:"Port"`
 	CorsAllowOrigins []string `yaml:"CorsAllowOrigins"`
+	StaticDir        string   `yaml:"StaticDir"` // 静态文件目录，默认为 www
 }
 
 // DebugConfig 调试配置结构体
@@ -347,7 +348,10 @@ func Load(filePath string) (*Config, error) {
 			Host:             "0.0.0.0",
 			Port:             8080,
 			CorsAllowOrigins: []string{"*"},
+			StaticDir:        "www",
 		}
+	} else if config.API.StaticDir == "" {
+		config.API.StaticDir = "www"
 	}
 
 	if config.ZLM == nil {
