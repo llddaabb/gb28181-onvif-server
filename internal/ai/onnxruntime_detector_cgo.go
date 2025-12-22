@@ -4,8 +4,8 @@
 package ai
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/lib -lonnxruntime -Wl,-rpath,${SRCDIR}/lib
-#cgo CFLAGS: -I${SRCDIR}/include
+#cgo LDFLAGS: -lonnxruntime
+#cgo CFLAGS: -I/usr/local/include
 
 #include <stdlib.h>
 #include <onnxruntime_c_api.h>
@@ -13,6 +13,67 @@ package ai
 // 错误处理辅助函数
 static const char* GetErrorMessage(OrtStatus* status, const OrtApi* api) {
     return api->GetErrorMessage(status);
+}
+
+// API 包装函数
+static OrtStatus* OrtApi_CreateEnv(const OrtApi* api, OrtLoggingLevel level, const char* logid, OrtEnv** out) {
+    return api->CreateEnv(level, logid, out);
+}
+
+static OrtStatus* OrtApi_CreateSessionOptions(const OrtApi* api, OrtSessionOptions** out) {
+    return api->CreateSessionOptions(out);
+}
+
+static OrtStatus* OrtApi_SetIntraOpNumThreads(const OrtApi* api, OrtSessionOptions* opts, int num) {
+    return api->SetIntraOpNumThreads(opts, num);
+}
+
+static OrtStatus* OrtApi_SetSessionGraphOptimizationLevel(const OrtApi* api, OrtSessionOptions* opts, GraphOptimizationLevel level) {
+    return api->SetSessionGraphOptimizationLevel(opts, level);
+}
+
+static OrtStatus* OrtApi_CreateSession(const OrtApi* api, const OrtEnv* env, const char* model_path, const OrtSessionOptions* opts, OrtSession** out) {
+    return api->CreateSession(env, model_path, opts, out);
+}
+
+static OrtStatus* OrtApi_CreateCpuMemoryInfo(const OrtApi* api, enum OrtAllocatorType type, enum OrtMemType mem_type, OrtMemoryInfo** out) {
+    return api->CreateCpuMemoryInfo(type, mem_type, out);
+}
+
+static OrtStatus* OrtApi_CreateTensorWithDataAsOrtValue(const OrtApi* api, const OrtMemoryInfo* info, void* data, size_t data_len, const int64_t* shape, size_t shape_len, ONNXTensorElementDataType type, OrtValue** out) {
+    return api->CreateTensorWithDataAsOrtValue(info, data, data_len, shape, shape_len, type, out);
+}
+
+static OrtStatus* OrtApi_Run(const OrtApi* api, OrtSession* session, const OrtRunOptions* run_options, const char* const* input_names, const OrtValue* const* inputs, size_t input_len, const char* const* output_names, size_t output_len, OrtValue** outputs) {
+    return api->Run(session, run_options, input_names, inputs, input_len, output_names, output_len, outputs);
+}
+
+static OrtStatus* OrtApi_GetTensorMutableData(const OrtApi* api, OrtValue* value, void** out) {
+    return api->GetTensorMutableData(value, out);
+}
+
+static void OrtApi_ReleaseValue(const OrtApi* api, OrtValue* value) {
+    api->ReleaseValue(value);
+}
+
+static void OrtApi_ReleaseSession(const OrtApi* api, OrtSession* session) {
+    api->ReleaseSession(session);
+}
+
+static void OrtApi_ReleaseSessionOptions(const OrtApi* api, OrtSessionOptions* opts) {
+    api->ReleaseSessionOptions(opts);
+}
+
+static void OrtApi_ReleaseMemoryInfo(const OrtApi* api, OrtMemoryInfo* info) {
+    api->ReleaseMemoryInfo(info);
+}
+
+static void OrtApi_ReleaseEnv(const OrtApi* api, OrtEnv* env) {
+    api->ReleaseEnv(env);
+}
+
+static const OrtApi* GetOrtApi() {
+    return OrtGetApiBase()->GetApi(ORT_API_VERSION);
 }
 */
 import "C"
@@ -74,7 +135,7 @@ func NewONNXRuntimeDetector(config DetectorConfig) (*ONNXRuntimeDetector, error)
 	}
 
 	// 获取 API
-	detector.api = C.OrtGetApiBase().GetApi(C.ORT_API_VERSION)
+	detector.api = C.GetOrtApi()
 	if detector.api == nil {
 		return nil, fmt.Errorf("无法获取 ONNX Runtime API")
 	}
@@ -273,7 +334,7 @@ func (d *ONNXRuntimeDetector) postprocess(scaleX, scaleY float32) []BBox {
 	// 8400 = 总检测数
 
 	numDetections := 8400
-	numFeatures := 84
+	_ = 84 // numFeatures: 4 (xywh) + 80 (class scores)
 
 	for i := 0; i < numDetections; i++ {
 		// 获取边界框坐标

@@ -190,10 +190,10 @@ func (s *Server) InviteRequest(deviceID, channelID string, rtpPort int, mediaIP 
 	// 构建 INVITE 消息，优先使用 mediaIP 作为本地 SIP 地址
 	inviteMsg := s.buildInviteMessage(device, channelID, callID, fromTag, sdp, mediaIP)
 
-	debug.Info("gb28181", "INVITE: device=%s channel=%s rtp=%d ssrc=%s", deviceID, channelID, rtpPort, ssrc)
+	debug.Info("gb28181", "INVITE: device=%s channel=%s rtp=%d ssrc=%s [%s]", deviceID, channelID, rtpPort, ssrc, device.Transport)
 
-	// 发送 INVITE
-	err = s.sendSIPMessageUDP(device, inviteMsg)
+	// 使用统一方法发送 INVITE（根据设备 Transport 自动选择 TCP/UDP）
+	err = s.SendSIPMessageToDevice(device, inviteMsg)
 	if err != nil {
 		return nil, fmt.Errorf("发送 INVITE 失败: %v", err)
 	}
@@ -264,26 +264,6 @@ func (s *Server) buildInviteMessage(device *Device, channelID, callID, fromTag, 
 	return msg
 }
 
-// sendSIPMessageUDP 通过 UDP 发送 SIP 消息
-func (s *Server) sendSIPMessageUDP(device *Device, message string) error {
-	addr := net.JoinHostPort(device.SipIP, strconv.Itoa(device.SipPort))
-
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		return fmt.Errorf("解析地址失败: %v", err)
-	}
-
-	if s.udpConn != nil {
-		_, err = s.udpConn.WriteToUDP([]byte(message), udpAddr)
-		if err != nil {
-			return fmt.Errorf("UDP发送失败: %v", err)
-		}
-		return nil
-	}
-
-	return fmt.Errorf("UDP连接不可用")
-}
-
 // ByeRequest 发送 BYE 请求停止流
 func (s *Server) ByeRequest(deviceID, channelID string) error {
 	session := sessionManager.GetSession(deviceID, channelID)
@@ -301,10 +281,10 @@ func (s *Server) ByeRequest(deviceID, channelID string) error {
 	// 构建 BYE 消息
 	byeMsg := s.buildByeMessage(device, session)
 
-	debug.Debug("gb28181", "BYE: device=%s channel=%s", deviceID, channelID)
+	debug.Debug("gb28181", "BYE: device=%s channel=%s [%s]", deviceID, channelID, device.Transport)
 
-	// 发送 BYE
-	err := s.sendSIPMessageUDP(device, byeMsg)
+	// 使用统一方法发送 BYE（根据设备 Transport 自动选择 TCP/UDP）
+	err := s.SendSIPMessageToDevice(device, byeMsg)
 	if err != nil {
 		debug.Warn("gb28181", "BYE发送失败: %v", err)
 	}

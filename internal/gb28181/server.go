@@ -45,6 +45,8 @@ type Device struct {
 	PTZSupported    bool       `json:"ptzSupported"`
 	RecordSupported bool       `json:"recordSupported"`
 	StreamMode      string     `json:"streamMode"` // TCP-Active, TCP-Passive, UDP
+	TCPConn         net.Conn   `json:"-"`          // TCP连接（用于复用）
+	ConnMux         sync.Mutex `json:"-"`          // 连接锁
 }
 
 // Channel GB28181通道结构体
@@ -183,8 +185,12 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 		return
 	}
 
+	// 记录所有收到的消息（调试用）
+	log.Printf("[GB28181] <<< UDP收到 [%s] 来自 %s (响应=%v)", message.Type, remoteAddr, message.IsResponse)
+
 	// 如果是响应，进行响应处理
 	if message.IsResponse {
+		log.Printf("[GB28181] <<< 响应: %d %s", message.StatusCode, message.Reason)
 		debug.Debug("gb28181", "收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, remoteAddr)
 		// 对于响应，我们需要向设备发送 ACK（如果是 INVITE 的2xx响应）
 		// 使用UDP连接发送 ACK
@@ -224,7 +230,8 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 
 // acceptConnections 处理客户端连接
 func (s *Server) acceptConnections() {
-	debug.Info("gb28181", "开始接受客户端连接")
+	debug.Info("gb28181", "开始接受TCP客户端连接")
+	log.Println("[GB28181] TCP监听已启动，等待TCP连接...")
 
 	for {
 		conn, err := s.listener.Accept()
@@ -241,7 +248,8 @@ func (s *Server) acceptConnections() {
 			}
 		}
 
-		debug.Info("gb28181", "新的客户端连接: %s", conn.RemoteAddr())
+		log.Printf("[GB28181] ✓ 收到TCP连接: %s", conn.RemoteAddr())
+		debug.Info("gb28181", "新的TCP客户端连接: %s", conn.RemoteAddr())
 		// 为每个连接创建一个会话处理协程
 		go s.handleConnection(conn)
 	}
@@ -249,7 +257,8 @@ func (s *Server) acceptConnections() {
 
 // handleConnection 处理单个连接
 func (s *Server) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	// 注意：不再在这里 defer conn.Close()
+	// TCP 连接将由设备管理，在设备注销或过期时关闭
 
 	debug.Debug("gb28181", "处理连接: %s", conn.RemoteAddr())
 
@@ -257,15 +266,27 @@ func (s *Server) handleConnection(conn net.Conn) {
 	buffer := make([]byte, 4096)
 
 	for {
+		// 设置读取超时，防止连接挂死
+		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+
 		// 接收数据
 		n, err := conn.Read(buffer)
 		if err != nil {
 			select {
 			case <-s.stopChan:
 				debug.Info("gb28181", "连接处理停止: %s", conn.RemoteAddr())
+				conn.Close()
 				return
 			default:
+				// 检查是否是超时错误
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// 超时，检查连接是否仍然有效
+					continue
+				}
 				debug.Warn("gb28181", "读取连接数据失败: %s - %v", conn.RemoteAddr(), err)
+				// 连接断开，清理设备的 TCP 连接引用
+				s.cleanupDeviceConnection(conn)
+				conn.Close()
 				return
 			}
 		}
@@ -275,6 +296,20 @@ func (s *Server) handleConnection(conn net.Conn) {
 			data := buffer[:n]
 			debug.Debug("gb28181", "收到SIP消息，长度: %d 字节", n)
 			s.HandleSIPMessage(conn, data)
+		}
+	}
+}
+
+// cleanupDeviceConnection 清理设备的 TCP 连接引用
+func (s *Server) cleanupDeviceConnection(conn net.Conn) {
+	s.devicesMux.Lock()
+	defer s.devicesMux.Unlock()
+
+	for _, device := range s.devices {
+		if device.TCPConn == conn {
+			device.TCPConn = nil
+			debug.Info("gb28181", "设备 %s 的 TCP 连接已断开", device.DeviceID)
+			break
 		}
 	}
 }
@@ -315,6 +350,11 @@ func (s *Server) heartbeatChecker() {
 
 // RegisterDevice 注册设备
 func (s *Server) RegisterDevice(deviceID, name, sipIP string, sipPort int, expires int) {
+	s.RegisterDeviceWithConn(deviceID, name, sipIP, sipPort, expires, "UDP", nil)
+}
+
+// RegisterDeviceWithConn 注册设备（带连接信息）
+func (s *Server) RegisterDeviceWithConn(deviceID, name, sipIP string, sipPort int, expires int, transport string, conn net.Conn) {
 	s.devicesMux.Lock()
 	defer s.devicesMux.Unlock()
 
@@ -329,7 +369,16 @@ func (s *Server) RegisterDevice(deviceID, name, sipIP string, sipPort int, expir
 		existing.RegisterTime = now
 		existing.LastKeepAlive = now
 		existing.Expires = expires
-		debug.Info("gb28181", "设备重新注册: ID=%s | 地址=%s:%d | 有效期=%d秒", deviceID, sipIP, sipPort, expires)
+		existing.Transport = transport
+		// 如果是 TCP 连接，更新连接
+		if transport == "TCP" && conn != nil {
+			// 关闭旧连接（如果有）
+			if existing.TCPConn != nil && existing.TCPConn != conn {
+				existing.TCPConn.Close()
+			}
+			existing.TCPConn = conn
+		}
+		debug.Info("gb28181", "设备重新注册: ID=%s | 地址=%s:%d | 传输=%s | 有效期=%d秒", deviceID, sipIP, sipPort, transport, expires)
 		return
 	}
 
@@ -339,16 +388,17 @@ func (s *Server) RegisterDevice(deviceID, name, sipIP string, sipPort int, expir
 		Status:        "online",
 		SipIP:         sipIP,
 		SipPort:       sipPort,
-		Transport:     "TCP",
+		Transport:     transport,
 		RegisterTime:  now,
 		LastKeepAlive: now,
 		Expires:       expires,
 		Channels:      make([]*Channel, 0),
 		StreamMode:    "TCP-Passive",
+		TCPConn:       conn,
 	}
 
 	s.devices[deviceID] = device
-	log.Printf("[GB28181] ✓ 设备注册: %s (%s:%d)", deviceID, sipIP, sipPort)
+	log.Printf("[GB28181] ✓ 设备注册: %s (%s:%d) [%s]", deviceID, sipIP, sipPort, transport)
 }
 
 // UpdateDeviceInfo 更新设备信息
@@ -372,6 +422,24 @@ func (s *Server) UpdateKeepAlive(deviceID string) {
 	if device, ok := s.devices[deviceID]; ok {
 		device.LastKeepAlive = time.Now().Unix()
 		device.Status = "online"
+	}
+}
+
+// UpdateKeepAliveWithAddr 更新设备心跳和地址（用于NAT环境下地址可能变化的情况）
+func (s *Server) UpdateKeepAliveWithAddr(deviceID, sipIP string, sipPort int) {
+	s.devicesMux.Lock()
+	defer s.devicesMux.Unlock()
+
+	if device, ok := s.devices[deviceID]; ok {
+		device.LastKeepAlive = time.Now().Unix()
+		device.Status = "online"
+		// 更新地址（NAT地址可能变化）
+		if device.SipIP != sipIP || device.SipPort != sipPort {
+			log.Printf("[GB28181] 设备地址更新: %s %s:%d -> %s:%d",
+				deviceID, device.SipIP, device.SipPort, sipIP, sipPort)
+			device.SipIP = sipIP
+			device.SipPort = sipPort
+		}
 	}
 }
 
@@ -545,7 +613,7 @@ func (s *Server) QueryCatalog(deviceID string) error {
 		return fmt.Errorf("设备 %s 不存在", deviceID)
 	}
 
-	// 生成目录查询 SIP MESSAGE
+	// 生成目录查询 XML
 	sn := time.Now().UnixNano() % 1000000
 	catalogXML := fmt.Sprintf(`<?xml version="1.0" encoding="GB2312"?>
 <Query>
@@ -554,42 +622,17 @@ func (s *Server) QueryCatalog(deviceID string) error {
 <DeviceID>%s</DeviceID>
 </Query>`, sn, deviceID)
 
-	// 构建 SIP MESSAGE 请求
-	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), s.config.SipIP)
-	branch := fmt.Sprintf("z9hG4bK%d", time.Now().UnixNano())
-	tag := fmt.Sprintf("%d", time.Now().UnixNano()%100000000)
+	// 使用统一的方法构建 SIP MESSAGE
+	sipMessage := s.BuildSIPMessageString(device, deviceID, "Application/MANSCDP+xml", catalogXML)
 
-	sipMessage := fmt.Sprintf("MESSAGE sip:%s@%s:%d SIP/2.0\r\n"+
-		"Via: SIP/2.0/UDP %s:%d;rport;branch=%s\r\n"+
-		"From: <sip:%s@%s>;tag=%s\r\n"+
-		"To: <sip:%s@%s:%d>\r\n"+
-		"Call-ID: %s\r\n"+
-		"CSeq: 1 MESSAGE\r\n"+
-		"Content-Type: Application/MANSCDP+xml\r\n"+
-		"Max-Forwards: 70\r\n"+
-		"Content-Length: %d\r\n\r\n%s",
-		deviceID, device.SipIP, device.SipPort,
-		s.config.SipIP, s.config.SipPort, branch,
-		s.config.ServerID, s.config.Realm, tag,
-		deviceID, device.SipIP, device.SipPort,
-		callID,
-		len(catalogXML), catalogXML)
-
-	// 发送到设备
-	remoteAddr := &net.UDPAddr{
-		IP:   net.ParseIP(device.SipIP),
-		Port: device.SipPort,
+	// 使用统一的方法发送（根据设备 Transport 自动选择 TCP/UDP）
+	err := s.SendSIPMessageToDevice(device, sipMessage)
+	if err != nil {
+		log.Printf("[GB28181] 发送目录查询失败: %v", err)
+		return err
 	}
 
-	if s.udpConn != nil {
-		_, err := s.udpConn.WriteToUDP([]byte(sipMessage), remoteAddr)
-		if err != nil {
-			log.Printf("[GB28181] 发送目录查询失败: %v", err)
-			return err
-		}
-		log.Printf("[GB28181] ✓ 已向设备 %s 发送目录查询请求", deviceID)
-	}
-
+	log.Printf("[GB28181] ✓ 已向设备 %s 发送目录查询请求 [%s]", deviceID, device.Transport)
 	return nil
 }
 
@@ -612,41 +655,160 @@ func (s *Server) QueryDeviceInfo(deviceID string) error {
 <DeviceID>%s</DeviceID>
 </Query>`, sn, deviceID)
 
-	// 构建 SIP MESSAGE 请求
-	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), s.config.SipIP)
-	branch := fmt.Sprintf("z9hG4bK%d", time.Now().UnixNano())
-	tag := fmt.Sprintf("%d", time.Now().UnixNano()%100000000)
+	// 使用统一的方法构建 SIP MESSAGE
+	sipMessage := s.BuildSIPMessageString(device, deviceID, "Application/MANSCDP+xml", queryXML)
 
-	sipMessage := fmt.Sprintf("MESSAGE sip:%s@%s:%d SIP/2.0\r\n"+
-		"Via: SIP/2.0/UDP %s:%d;rport;branch=%s\r\n"+
-		"From: <sip:%s@%s>;tag=%s\r\n"+
-		"To: <sip:%s@%s:%d>\r\n"+
-		"Call-ID: %s\r\n"+
-		"CSeq: 1 MESSAGE\r\n"+
-		"Content-Type: Application/MANSCDP+xml\r\n"+
-		"Max-Forwards: 70\r\n"+
-		"Content-Length: %d\r\n\r\n%s",
-		deviceID, device.SipIP, device.SipPort,
-		s.config.SipIP, s.config.SipPort, branch,
-		s.config.ServerID, s.config.Realm, tag,
-		deviceID, device.SipIP, device.SipPort,
-		callID,
-		len(queryXML), queryXML)
+	// 使用统一的方法发送（根据设备 Transport 自动选择 TCP/UDP）
+	err := s.SendSIPMessageToDevice(device, sipMessage)
+	if err != nil {
+		log.Printf("[GB28181] 发送设备信息查询失败: %v", err)
+		return err
+	}
 
-	// 发送到设备
+	log.Printf("[GB28181] ✓ 已向设备 %s 发送设备信息查询请求 [%s]", deviceID, device.Transport)
+	return nil
+}
+
+// SendSIPMessageToDevice 统一的 SIP 消息发送方法
+// 优先使用 TCP，如果设备明确指定 UDP 或 TCP 发送失败则使用 UDP
+func (s *Server) SendSIPMessageToDevice(device *Device, message string) error {
+	if device == nil {
+		return fmt.Errorf("设备为空")
+	}
+
+	// 优先使用 TCP（除非设备明确指定 UDP）
+	if device.Transport == "UDP" {
+		return s.sendViaUDP(device, message)
+	}
+
+	// 默认使用 TCP，失败后回退到 UDP
+	err := s.sendViaTCP(device, message)
+	if err != nil {
+		debug.Warn("gb28181", "TCP发送失败，回退到UDP: %v", err)
+		return s.sendViaUDP(device, message)
+	}
+	return nil
+}
+
+// sendViaTCP 通过 TCP 发送 SIP 消息（复用已有连接）
+func (s *Server) sendViaTCP(device *Device, message string) error {
+	device.ConnMux.Lock()
+	defer device.ConnMux.Unlock()
+
+	// 检查是否有可用的 TCP 连接
+	if device.TCPConn != nil {
+		// 尝试使用现有连接发送
+		_, err := device.TCPConn.Write([]byte(message))
+		if err == nil {
+			debug.Debug("gb28181", "TCP消息已通过复用连接发送到设备 %s", device.DeviceID)
+			return nil
+		}
+		// 发送失败，连接可能已断开，清理连接
+		debug.Warn("gb28181", "TCP连接发送失败，尝试重新连接: %v", err)
+		device.TCPConn.Close()
+		device.TCPConn = nil
+	}
+
+	// 没有可用连接，创建新连接
+	addr := net.JoinHostPort(device.SipIP, fmt.Sprintf("%d", device.SipPort))
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		debug.Error("gb28181", "TCP连接设备失败 %s: %v", addr, err)
+		return fmt.Errorf("TCP连接设备失败 %s: %v", addr, err)
+	}
+
+	// 发送消息
+	_, err = conn.Write([]byte(message))
+	if err != nil {
+		conn.Close()
+		debug.Error("gb28181", "TCP发送消息失败: %v", err)
+		return fmt.Errorf("TCP发送消息失败: %v", err)
+	}
+
+	// 保存新连接供复用（主动建立的连接）
+	device.TCPConn = conn
+	debug.Debug("gb28181", "TCP消息已通过新连接发送到设备 %s", device.DeviceID)
+
+	// 启动一个协程读取响应（防止连接被设备关闭）
+	go s.handleTCPResponse(device, conn)
+
+	return nil
+}
+
+// handleTCPResponse 处理 TCP 连接上的响应
+func (s *Server) handleTCPResponse(device *Device, conn net.Conn) {
+	buffer := make([]byte, 4096)
+	for {
+		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+		n, err := conn.Read(buffer)
+		if err != nil {
+			// 连接关闭或错误，清理
+			device.ConnMux.Lock()
+			if device.TCPConn == conn {
+				device.TCPConn = nil
+			}
+			device.ConnMux.Unlock()
+			conn.Close()
+			return
+		}
+		if n > 0 {
+			// 处理响应消息
+			s.HandleSIPMessage(conn, buffer[:n])
+		}
+	}
+}
+
+// sendViaUDP 通过 UDP 发送 SIP 消息
+func (s *Server) sendViaUDP(device *Device, message string) error {
+	if s.udpConn == nil {
+		return fmt.Errorf("UDP连接未初始化")
+	}
+
 	remoteAddr := &net.UDPAddr{
 		IP:   net.ParseIP(device.SipIP),
 		Port: device.SipPort,
 	}
 
-	if s.udpConn != nil {
-		_, err := s.udpConn.WriteToUDP([]byte(sipMessage), remoteAddr)
-		if err != nil {
-			log.Printf("[GB28181] 发送设备信息查询失败: %v", err)
-			return err
-		}
-		log.Printf("[GB28181] ✓ 已向设备 %s 发送设备信息查询请求", deviceID)
+	log.Printf("[GB28181] UDP发送目标: %s:%d (设备: %s)", device.SipIP, device.SipPort, device.DeviceID)
+
+	_, err := s.udpConn.WriteToUDP([]byte(message), remoteAddr)
+	if err != nil {
+		debug.Error("gb28181", "UDP发送消息失败: %v", err)
+		return fmt.Errorf("UDP发送消息失败: %v", err)
 	}
 
+	debug.Debug("gb28181", "UDP消息已发送到设备 %s (%s)", device.DeviceID, remoteAddr.String())
 	return nil
+}
+
+// BuildSIPMessageString 构建完整的 SIP MESSAGE 请求字符串
+func (s *Server) BuildSIPMessageString(device *Device, targetID, contentType, body string) string {
+	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), s.config.SipIP)
+	branch := fmt.Sprintf("z9hG4bK%d", time.Now().UnixNano())
+	tag := fmt.Sprintf("%d", time.Now().UnixNano()%100000000)
+
+	// Via 头使用正确的传输协议
+	transport := device.Transport
+	if transport == "" {
+		transport = "UDP"
+	}
+
+	sipMessage := fmt.Sprintf("MESSAGE sip:%s@%s:%d SIP/2.0\r\n"+
+		"Via: SIP/2.0/%s %s:%d;rport;branch=%s\r\n"+
+		"From: <sip:%s@%s>;tag=%s\r\n"+
+		"To: <sip:%s@%s:%d>\r\n"+
+		"Call-ID: %s\r\n"+
+		"CSeq: 1 MESSAGE\r\n"+
+		"Content-Type: %s\r\n"+
+		"Max-Forwards: 70\r\n"+
+		"Content-Length: %d\r\n\r\n%s",
+		targetID, device.SipIP, device.SipPort,
+		transport, s.config.SipIP, s.config.SipPort, branch,
+		s.config.ServerID, s.config.Realm, tag,
+		targetID, device.SipIP, device.SipPort,
+		callID,
+		contentType,
+		len(body), body)
+
+	return sipMessage
 }

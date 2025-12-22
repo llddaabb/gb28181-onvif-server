@@ -432,8 +432,8 @@ func (s *Server) handleRegister(conn net.Conn, message *SIPMessage) {
 		}
 	}
 
-	// 注册设备
-	s.RegisterDevice(deviceID, "", ip, port, expires)
+	// 注册设备（TCP模式，保存连接）
+	s.RegisterDeviceWithConn(deviceID, "", ip, port, expires, "TCP", conn)
 
 	// 发送200 OK响应
 	response := BuildSIPResponse(message, 200, "OK")
@@ -603,9 +603,62 @@ func (s *Server) handleBye(conn net.Conn, message *SIPMessage) {
 
 // handleMessage 处理MESSAGE请求（GB28181中的设备信息查询等）
 func (s *Server) handleMessage(conn net.Conn, message *SIPMessage) {
-	// 简化处理，返回200 OK
+	// 从 From 头提取设备ID
+	fromHeader := message.Headers["From"]
+	deviceID := extractDeviceID(fromHeader)
+
+	// 发送200 OK响应
 	response := BuildSIPResponse(message, 200, "OK")
 	conn.Write(response)
+
+	// 如果设备ID有效，检查设备是否已注册
+	if deviceID != "" {
+		s.devicesMux.RLock()
+		_, exists := s.devices[deviceID]
+		s.devicesMux.RUnlock()
+
+		// 获取远程地址信息
+		remoteAddr := conn.RemoteAddr().String()
+		ip, portStr, _ := net.SplitHostPort(remoteAddr)
+		port := 5060
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+
+		if !exists {
+			// 设备未注册，自动注册（TCP 模式，保存连接）
+			log.Printf("[GB28181] ✓ 设备自动注册(TCP): %s", deviceID)
+			s.RegisterDeviceWithConn(deviceID, "", ip, port, 3600, "TCP", conn)
+
+			// 自动查询设备信息和目录
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				s.QueryDeviceInfo(deviceID)
+				time.Sleep(500 * time.Millisecond)
+				s.QueryCatalog(deviceID)
+			}()
+		} else {
+			// 设备已注册，更新心跳时间
+			s.UpdateKeepAlive(deviceID)
+		}
+	}
+
+	// 解析消息体
+	if len(message.Body) > 0 {
+		if strings.Contains(message.Body, "Keepalive") {
+			// 心跳消息，只更新状态
+			if deviceID != "" {
+				s.UpdateKeepAlive(deviceID)
+			}
+		} else if strings.Contains(message.Body, "Catalog") && strings.Contains(message.Body, "Response") {
+			s.parseCatalogResponse(deviceID, message.Body)
+		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
+			s.parseDeviceInfoResponse(deviceID, message.Body)
+		} else {
+			// 其他消息类型
+			debug.Debug("gb28181", "TCP收到MESSAGE (设备 %s): %d字节", deviceID, len(message.Body))
+		}
+	}
 }
 
 // handleOptions 处理OPTIONS请求
@@ -707,15 +760,18 @@ func (s *Server) handleRegisterUDP(remoteAddr *net.UDPAddr, message *SIPMessage)
 	}
 
 	// 解析Contact头获取设备IP和端口
+	// 注意：对于 NAT 后的设备，必须使用 remoteAddr（实际的UDP源地址）
+	// 而不是 Contact 头中的内网地址，否则服务器无法回复消息
 	contactHeader := message.Headers["Contact"]
 	ip := remoteAddr.IP.String()
 	port := remoteAddr.Port
 
+	// 记录 Contact 中的地址用于调试
 	if contactHeader != "" {
 		extractedIP, extractedPort := extractIPPortFromContact(contactHeader)
-		if extractedIP != "" {
-			ip = extractedIP
-			port = extractedPort
+		if extractedIP != "" && extractedIP != ip {
+			log.Printf("[GB28181] NAT检测: Contact=%s:%d, 实际源=%s:%d (使用实际源地址)",
+				extractedIP, extractedPort, ip, port)
 		}
 	}
 
@@ -754,6 +810,7 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 
 		if !exists {
 			// 设备未注册，自动注册（从 MESSAGE 消息中提取信息）
+			// 使用 UDP 数据包的实际源地址，这对 NAT 穿透很重要
 			device := &Device{
 				DeviceID:      deviceID,
 				SipIP:         remoteAddr.IP.String(),
@@ -768,35 +825,49 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 			s.devicesMux.Lock()
 			s.devices[deviceID] = device
 			s.devicesMux.Unlock()
-			log.Printf("[GB28181] ✓ 设备自动注册: %s", deviceID)
+			log.Printf("[GB28181] ✓ 设备自动注册: %s (实际源地址: %s:%d)", deviceID, remoteAddr.IP.String(), remoteAddr.Port)
 
-			// 自动查询设备信息和目录
+			// 立即发送查询（利用 NAT 映射窗口，不要延迟）
 			go func() {
-				time.Sleep(500 * time.Millisecond)
 				s.QueryDeviceInfo(deviceID)
-				time.Sleep(500 * time.Millisecond)
 				s.QueryCatalog(deviceID)
 			}()
 		} else {
-			// 设备已注册，更新心跳时间
-			s.UpdateKeepAlive(deviceID)
+			// 设备已注册，更新心跳时间和地址（NAT地址可能变化）
+			s.UpdateKeepAliveWithAddr(deviceID, remoteAddr.IP.String(), remoteAddr.Port)
 		}
 	}
 
 	if len(message.Body) > 0 {
+		// 记录收到的消息体内容（调试用）
+		log.Printf("[GB28181] MESSAGE内容: %s", message.Body[:min(len(message.Body), 200)])
+
 		if strings.Contains(message.Body, "Keepalive") {
-			// 心跳消息，只更新状态
+			// 心跳消息，更新状态
 			if deviceID != "" {
 				s.UpdateKeepAlive(deviceID)
+				// 如果设备还没有通道，利用心跳的 NAT 窗口发送目录查询
+				s.devicesMux.RLock()
+				device, exists := s.devices[deviceID]
+				hasChannels := exists && len(device.Channels) > 0
+				s.devicesMux.RUnlock()
+				if !hasChannels {
+					log.Printf("[GB28181] 设备 %s 无通道，利用心跳窗口发送目录查询", deviceID)
+					go s.QueryCatalog(deviceID)
+				}
 			}
 		} else if strings.Contains(message.Body, "Catalog") && strings.Contains(message.Body, "Response") {
+			log.Printf("[GB28181] 收到目录响应！")
 			s.parseCatalogResponse(deviceID, message.Body)
 		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
+			log.Printf("[GB28181] 收到设备信息响应！")
 			s.parseDeviceInfoResponse(deviceID, message.Body)
 		} else {
 			// 其他消息类型
-			debug.Debug("gb28181", "收到MESSAGE (设备 %s): %d字节", deviceID, len(message.Body))
+			log.Printf("[GB28181] 未知MESSAGE类型: %s", message.Body[:min(len(message.Body), 100)])
 		}
+	} else {
+		log.Printf("[GB28181] MESSAGE无消息体")
 	}
 }
 
