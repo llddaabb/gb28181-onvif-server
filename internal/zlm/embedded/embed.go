@@ -28,8 +28,6 @@ var WWWFiles embed.FS
 var Version string
 
 func init() {
-	// 启用嵌入式 ZLM
-	if len(MediaServerBinary) > 0 {
-		EmbedEnabled = true
-	}
+	// 启用嵌入式 ZLM (当此文件被编译时表示 MediaServer 已嵌入)
+	EmbedEnabled = true
 }

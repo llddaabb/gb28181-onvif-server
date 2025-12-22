@@ -157,6 +157,174 @@
             </el-table-column>
           </el-table>
         </el-tab-pane>
+
+        <!-- AI智能录像 -->
+        <el-tab-pane label="AI录像" name="ai">
+          <!-- AI状态概览 -->
+          <el-row :gutter="20" style="margin-bottom: 20px;">
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <div class="stat-title">检测器状态</div>
+                <div class="stat-value">
+                  <el-tag :type="aiDetectorInfo.available ? 'success' : 'danger'" size="large">
+                    {{ aiDetectorInfo.available ? '已就绪' : '未启用' }}
+                  </el-tag>
+                </div>
+                <div v-if="aiDetectorInfo.available" class="stat-desc">
+                  {{ aiDetectorInfo.backend }} / {{ aiDetectorInfo.name }}
+                </div>
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <div class="stat-title">运行中任务</div>
+                <div class="stat-value">{{ Object.keys(aiRecordingStatus).length }}</div>
+                <div class="stat-desc">个通道正在AI检测</div>
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <div class="stat-title">今日检测</div>
+                <div class="stat-value">{{ aiTodayStats.detections }}</div>
+                <div class="stat-desc">共检测到 {{ aiTodayStats.persons }} 次人形</div>
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <div class="stat-title">AI录像时长</div>
+                <div class="stat-value">{{ aiTodayStats.recordTime }}</div>
+                <div class="stat-desc">今日AI触发录像</div>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <!-- AI录像配置 -->
+          <el-card style="margin-bottom: 20px;">
+            <template #header>
+              <div class="card-header">
+                <span>启动AI录像</span>
+                <el-button type="primary" size="small" @click="refreshAIStatus">
+                  <el-icon><Refresh /></el-icon> 刷新状态
+                </el-button>
+              </div>
+            </template>
+            <el-form :inline="true" :model="aiRecordingForm">
+              <el-form-item label="选择通道">
+                <el-select v-model="aiRecordingForm.channelId" placeholder="请选择通道" style="width: 200px;">
+                  <el-option 
+                    v-for="channel in channels" 
+                    :key="channel.channelId" 
+                    :label="channel.channelName || channel.channelId" 
+                    :value="channel.channelId"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="检测模式">
+                <el-select v-model="aiRecordingForm.mode" placeholder="选择模式" style="width: 150px;">
+                  <el-option label="人形检测" value="person" />
+                  <el-option label="移动检测" value="motion" />
+                  <el-option label="连续录像" value="continuous" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="success" @click="startAIRecording" :loading="aiLoading">
+                  <el-icon><VideoPlay /></el-icon> 启动AI录像
+                </el-button>
+              </el-form-item>
+            </el-form>
+          </el-card>
+
+          <!-- 运行中的AI录像任务 -->
+          <el-table :data="aiRecordingList" style="width: 100%;">
+            <el-table-column prop="channel_id" label="通道ID" width="180" />
+            <el-table-column label="检测模式" width="120">
+              <template #default="scope">
+                <el-tag :type="getModeTagType(scope.row.mode)">
+                  {{ getModeLabel(scope.row.mode) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="录像状态" width="120">
+              <template #default="scope">
+                <el-tag :type="scope.row.is_recording ? 'danger' : 'info'">
+                  {{ scope.row.is_recording ? '录制中' : '待检测' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="检测统计" width="180">
+              <template #default="scope">
+                <span>检测: {{ scope.row.stats?.TotalDetections || 0 }} 次</span><br>
+                <span>人形: {{ scope.row.stats?.PersonDetections || 0 }} 次</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="录像统计" width="180">
+              <template #default="scope">
+                <span>会话: {{ scope.row.stats?.RecordingSessions || 0 }} 次</span><br>
+                <span>时长: {{ formatDuration(scope.row.stats?.TotalRecordTime || 0) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="最后检测" width="180">
+              <template #default="scope">
+                {{ formatDateTime(scope.row.last_detect_time) || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="150" fixed="right">
+              <template #default="scope">
+                <el-button type="danger" size="small" @click="stopAIRecording(scope.row.channel_id)">
+                  <el-icon><VideoPause /></el-icon> 停止
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <!-- AI配置面板 -->
+          <el-card style="margin-top: 20px;">
+            <template #header>
+              <div class="card-header">
+                <span>AI检测配置</span>
+                <el-button type="primary" size="small" @click="saveAIConfig" :loading="aiConfigLoading">
+                  保存配置
+                </el-button>
+              </div>
+            </template>
+            <el-form :model="aiConfig" label-width="120px">
+              <el-row :gutter="20">
+                <el-col :span="8">
+                  <el-form-item label="置信度阈值">
+                    <el-slider v-model="aiConfig.confidence" :min="0.1" :max="1" :step="0.05" show-input />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="IoU阈值">
+                    <el-slider v-model="aiConfig.iouThreshold" :min="0.1" :max="1" :step="0.05" show-input />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="检测线程数">
+                    <el-input-number v-model="aiConfig.numThreads" :min="1" :max="16" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="20">
+                <el-col :span="8">
+                  <el-form-item label="检测间隔(秒)">
+                    <el-input-number v-model="aiConfig.detectInterval" :min="1" :max="60" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="录像延迟(秒)">
+                    <el-input-number v-model="aiConfig.recordDelay" :min="5" :max="300" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="自动启动">
+                    <el-switch v-model="aiConfig.autoStart" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+            </el-form>
+          </el-card>
+        </el-tab-pane>
       </el-tabs>
     </el-card>
 
@@ -247,9 +415,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { Refresh, VideoPlay, VideoPause, Download, CopyDocument } from '@element-plus/icons-vue'
 
 interface Recording {
   recordingId: string
@@ -276,12 +445,27 @@ interface Channel {
   channelId: string
   channelName: string
   deviceId: string
+  streamURL?: string
 }
 
 interface Device {
   deviceId: string
   name: string
   status: string
+}
+
+interface AIRecordingStatus {
+  channel_id: string
+  mode: string
+  is_recording: boolean
+  last_detect_time: string
+  last_person_time: string
+  stats: {
+    TotalDetections: number
+    PersonDetections: number
+    RecordingSessions: number
+    TotalRecordTime: number
+  }
 }
 
 const activeTab = ref('device')
@@ -312,6 +496,42 @@ const currentPlayback = ref({
   modTime: '',
   playUrl: '',
   note: ''
+})
+
+// AI录像相关
+const aiLoading = ref(false)
+const aiConfigLoading = ref(false)
+const aiRecordingStatus = ref<Record<string, AIRecordingStatus>>({})
+const aiDetectorInfo = ref({
+  available: false,
+  name: '',
+  backend: '',
+  inputSize: 0,
+  confidence: 0,
+  iouThreshold: 0
+})
+const aiRecordingForm = ref({
+  channelId: '',
+  mode: 'person'
+})
+const aiConfig = ref({
+  confidence: 0.5,
+  iouThreshold: 0.45,
+  numThreads: 4,
+  detectInterval: 2,
+  recordDelay: 10,
+  autoStart: false
+})
+const aiTodayStats = ref({
+  detections: 0,
+  persons: 0,
+  recordTime: '0分钟'
+})
+let aiStatusTimer: number | null = null
+
+// 计算AI录像列表
+const aiRecordingList = computed(() => {
+  return Object.values(aiRecordingStatus.value)
 })
 
 const availableChannels = computed(() => {
@@ -508,9 +728,198 @@ const copyToClipboard = async (text: string) => {
   }
 }
 
+// AI录像相关方法
+const fetchAIDetectorInfo = async () => {
+  try {
+    const response = await axios.get('http://localhost:9080/api/ai/detector/info')
+    if (response.data.success) {
+      aiDetectorInfo.value = response.data.info || { available: false }
+    }
+  } catch (error) {
+    console.error('获取AI检测器信息失败:', error)
+    aiDetectorInfo.value = { available: false, name: '', backend: '', inputSize: 0, confidence: 0, iouThreshold: 0 }
+  }
+}
+
+const fetchAIConfig = async () => {
+  try {
+    const response = await axios.get('http://localhost:9080/api/ai/config')
+    if (response.data.success && response.data.config) {
+      const cfg = response.data.config
+      aiConfig.value = {
+        confidence: cfg.Confidence || 0.5,
+        iouThreshold: cfg.IoUThreshold || 0.45,
+        numThreads: cfg.NumThreads || 4,
+        detectInterval: cfg.DetectInterval || 2,
+        recordDelay: cfg.RecordDelay || 10,
+        autoStart: cfg.AutoStart || false
+      }
+    }
+  } catch (error) {
+    console.error('获取AI配置失败:', error)
+  }
+}
+
+const saveAIConfig = async () => {
+  aiConfigLoading.value = true
+  try {
+    const response = await axios.put('http://localhost:9080/api/ai/config', {
+      Enable: true,
+      Confidence: aiConfig.value.confidence,
+      IoUThreshold: aiConfig.value.iouThreshold,
+      NumThreads: aiConfig.value.numThreads,
+      DetectInterval: aiConfig.value.detectInterval,
+      RecordDelay: aiConfig.value.recordDelay,
+      AutoStart: aiConfig.value.autoStart
+    })
+    if (response.data.success) {
+      ElMessage.success('AI配置保存成功')
+    } else {
+      ElMessage.error('保存失败')
+    }
+  } catch (error) {
+    ElMessage.error('保存AI配置失败')
+    console.error('保存AI配置失败:', error)
+  } finally {
+    aiConfigLoading.value = false
+  }
+}
+
+const refreshAIStatus = async () => {
+  try {
+    const response = await axios.get('http://localhost:9080/api/ai/recording/status/all')
+    if (response.data.success) {
+      aiRecordingStatus.value = response.data.status || {}
+      
+      // 计算今日统计
+      let totalDetections = 0
+      let totalPersons = 0
+      let totalRecordTime = 0
+      
+      Object.values(aiRecordingStatus.value).forEach((status: any) => {
+        if (status.stats) {
+          totalDetections += status.stats.TotalDetections || 0
+          totalPersons += status.stats.PersonDetections || 0
+          totalRecordTime += status.stats.TotalRecordTime || 0
+        }
+      })
+      
+      aiTodayStats.value = {
+        detections: totalDetections,
+        persons: totalPersons,
+        recordTime: formatDuration(totalRecordTime)
+      }
+    }
+  } catch (error) {
+    console.error('获取AI录像状态失败:', error)
+  }
+}
+
+const startAIRecording = async () => {
+  if (!aiRecordingForm.value.channelId) {
+    ElMessage.warning('请选择通道')
+    return
+  }
+
+  aiLoading.value = true
+  try {
+    const response = await axios.post('http://localhost:9080/api/ai/recording/start', {
+      channel_id: aiRecordingForm.value.channelId,
+      mode: aiRecordingForm.value.mode
+    })
+    
+    if (response.data.success) {
+      ElMessage.success(`AI录像已启动: ${aiRecordingForm.value.channelId}`)
+      aiRecordingForm.value.channelId = ''
+      await refreshAIStatus()
+    } else {
+      ElMessage.error(response.data.error || '启动失败')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.error || '启动AI录像失败')
+    console.error('启动AI录像失败:', error)
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+const stopAIRecording = async (channelId: string) => {
+  try {
+    const response = await axios.post('http://localhost:9080/api/ai/recording/stop', {
+      channel_id: channelId
+    })
+    
+    if (response.data.success) {
+      ElMessage.success(`AI录像已停止: ${channelId}`)
+      await refreshAIStatus()
+    } else {
+      ElMessage.error(response.data.error || '停止失败')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.error || '停止AI录像失败')
+    console.error('停止AI录像失败:', error)
+  }
+}
+
+const getModeLabel = (mode: string) => {
+  const labels: Record<string, string> = {
+    person: '人形检测',
+    motion: '移动检测',
+    continuous: '连续录像',
+    manual: '手动模式'
+  }
+  return labels[mode] || mode
+}
+
+const getModeTagType = (mode: string) => {
+  const types: Record<string, string> = {
+    person: 'success',
+    motion: 'warning',
+    continuous: 'primary',
+    manual: 'info'
+  }
+  return types[mode] || 'info'
+}
+
+const formatDuration = (nanoseconds: number) => {
+  // Go的time.Duration是纳秒
+  const seconds = Math.floor(nanoseconds / 1e9)
+  if (seconds < 60) return `${seconds}秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}分${seconds % 60}秒`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}时${minutes % 60}分`
+}
+
+const formatDateTime = (dateStr: string) => {
+  if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return ''
+  try {
+    const date = new Date(dateStr)
+    return date.toLocaleString('zh-CN')
+  } catch {
+    return dateStr
+  }
+}
+
 onMounted(() => {
   fetchDevices()
   fetchChannels()
+  fetchAIDetectorInfo()
+  fetchAIConfig()
+  refreshAIStatus()
+  
+  // 定时刷新AI状态
+  aiStatusTimer = window.setInterval(() => {
+    if (activeTab.value === 'ai') {
+      refreshAIStatus()
+    }
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (aiStatusTimer) {
+    clearInterval(aiStatusTimer)
+  }
 })
 </script>
 
@@ -561,5 +970,29 @@ onMounted(() => {
   background-color: #f5f7fa;
   padding: 15px;
   border-radius: 4px;
+}
+
+/* AI录像相关样式 */
+.stat-card {
+  text-align: center;
+  padding: 10px;
+}
+
+.stat-card .stat-title {
+  font-size: 14px;
+  color: #909399;
+  margin-bottom: 10px;
+}
+
+.stat-card .stat-value {
+  font-size: 28px;
+  font-weight: bold;
+  color: #303133;
+  margin-bottom: 5px;
+}
+
+.stat-card .stat-desc {
+  font-size: 12px;
+  color: #909399;
 }
 </style>

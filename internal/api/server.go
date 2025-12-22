@@ -554,10 +554,13 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	aiGroup := r.PathPrefix("/api/ai").Subrouter()
 	aiGroup.HandleFunc("/recording/start", s.handleStartAIRecording).Methods("POST")
 	aiGroup.HandleFunc("/recording/stop", s.handleStopAIRecording).Methods("POST")
+	aiGroup.HandleFunc("/recording/stop/all", s.handleStopAllAIRecording).Methods("POST")
 	aiGroup.HandleFunc("/recording/status", s.handleGetAIRecordingStatus).Methods("GET")
 	aiGroup.HandleFunc("/recording/status/all", s.handleGetAllAIRecordingStatus).Methods("GET")
 	aiGroup.HandleFunc("/config", s.handleGetAIConfig).Methods("GET")
 	aiGroup.HandleFunc("/config", s.handleUpdateAIConfig).Methods("PUT")
+	aiGroup.HandleFunc("/detector/info", s.handleGetAIDetectorInfo).Methods("GET")
+	aiGroup.HandleFunc("/detect", s.handleAIDetect).Methods("POST")
 
 	// 设备控制API
 	controlGroup := r.PathPrefix("/api/control").Subrouter()

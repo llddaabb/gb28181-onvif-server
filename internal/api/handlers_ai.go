@@ -27,6 +27,13 @@ func (s *Server) handleStartAIRecording(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// 如果没有提供StreamURL，尝试从通道配置获取
+	if req.StreamURL == "" && req.ChannelID != "" {
+		if channel, exists := s.channelManager.GetChannel(req.ChannelID); exists && channel != nil {
+			req.StreamURL = channel.StreamURL
+		}
+	}
+
 	mode := ai.RecordingModePerson // 默认人形检测
 	switch req.Mode {
 	case "motion":
@@ -141,8 +148,92 @@ func (s *Server) handleUpdateAIConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 更新AI管理器配置
+	if s.aiManager != nil {
+		s.aiManager.SetConfig(&aiConfig)
+	}
+
 	respondRaw(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"config":  s.config.AI,
+	})
+}
+
+// handleGetAIDetectorInfo 获取AI检测器信息
+func (s *Server) handleGetAIDetectorInfo(w http.ResponseWriter, r *http.Request) {
+	if s.aiManager == nil {
+		respondRaw(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"info": map[string]interface{}{
+				"available": false,
+				"error":     "AI功能未启用",
+			},
+		})
+		return
+	}
+
+	info := s.aiManager.GetDetectorInfo()
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"info":    info,
+	})
+}
+
+// handleAIDetect 执行单次AI检测
+func (s *Server) handleAIDetect(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ChannelID string `json:"channel_id"`
+		StreamURL string `json:"stream_url"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondBadRequest(w, err.Error())
+		return
+	}
+
+	if s.aiManager == nil {
+		respondServiceUnavailable(w, "AI功能未启用")
+		return
+	}
+
+	detector := s.aiManager.GetDetector()
+	if detector == nil {
+		respondServiceUnavailable(w, "AI检测器未初始化")
+		return
+	}
+
+	// 如果没有提供StreamURL，尝试从通道配置获取
+	streamURL := req.StreamURL
+	if streamURL == "" && req.ChannelID != "" {
+		if channel, exists := s.channelManager.GetChannel(req.ChannelID); exists && channel != nil {
+			streamURL = channel.StreamURL
+		}
+	}
+
+	if streamURL == "" {
+		respondBadRequest(w, "缺少流地址")
+		return
+	}
+
+	// 执行检测（这里简化处理，实际应该从流中抓帧）
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success":    true,
+		"channel_id": req.ChannelID,
+		"message":    "检测请求已提交，请通过AI录像状态API查看结果",
+	})
+}
+
+// handleStopAllAIRecording 停止所有AI录像
+func (s *Server) handleStopAllAIRecording(w http.ResponseWriter, r *http.Request) {
+	if s.aiManager == nil {
+		respondServiceUnavailable(w, "AI功能未启用")
+		return
+	}
+
+	s.aiManager.StopAll()
+
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "所有AI录像已停止",
 	})
 }

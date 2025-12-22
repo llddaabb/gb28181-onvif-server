@@ -5,9 +5,24 @@
 
 # 变量
 GO := go
+
+# 自动检测系统架构
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),x86_64)
+    DETECTED_ARCH := amd64
+else ifeq ($(UNAME_M),amd64)
+    DETECTED_ARCH := amd64
+else ifeq ($(UNAME_M),aarch64)
+    DETECTED_ARCH := arm64
+else ifeq ($(UNAME_M),arm64)
+    DETECTED_ARCH := arm64
+else
+    DETECTED_ARCH := $(shell go env GOARCH)
+endif
+
 # 平台设置 (可通过命令行覆盖: make build GOOS=windows GOARCH=amd64)
 GOOS ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
+GOARCH ?= $(DETECTED_ARCH)
 BUILD_DIR := build
 OUTPUT_DIR := dist
 SERVER_NAME := gb28181-server
@@ -46,6 +61,7 @@ build: build-server
 
 # 构建服务器
 build-server: check-zlm-platform
+	@echo ">>> 检测系统架构: $(UNAME_M) -> $(DETECTED_ARCH)"
 	@echo ">>> 构建 Go 服务器 ($(GOOS)/$(GOARCH))..."
 	@mkdir -p $(OUTPUT_DIR)
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build \
@@ -55,34 +71,31 @@ build-server: check-zlm-platform
 		./cmd/server
 	@echo "✓ 服务器构建完成: $(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT)"
 
-# 检查 ZLM 平台一致性
+# 检查 ZLM 平台一致性（自动检测并按需重新编译）
 check-zlm-platform:
 	@if [ -f "$(ZLM_EMBED_DIR)/MediaServer" ]; then \
-		if [ -f "$(ZLM_PLATFORM_FILE)" ]; then \
-			SAVED_PLATFORM=$$(cat $(ZLM_PLATFORM_FILE)); \
-			if [ "$$SAVED_PLATFORM" != "$(CURRENT_PLATFORM)" ]; then \
-				echo "⚠ ZLM 平台不匹配: $$SAVED_PLATFORM != $(CURRENT_PLATFORM)"; \
-				echo ">>> 重新编译 ZLM for $(CURRENT_PLATFORM)..."; \
-				$(MAKE) build-zlm; \
-			else \
-				echo "✓ ZLM 平台匹配: $(CURRENT_PLATFORM)"; \
-			fi \
+		ZLM_FILE_INFO=$$(file $(ZLM_EMBED_DIR)/MediaServer); \
+		if echo "$$ZLM_FILE_INFO" | grep -q "x86-64\|x86_64"; then \
+			ZLM_DETECTED_ARCH="amd64"; \
+		elif echo "$$ZLM_FILE_INFO" | grep -q "aarch64\|ARM aarch64\|ARM64"; then \
+			ZLM_DETECTED_ARCH="arm64"; \
+		elif echo "$$ZLM_FILE_INFO" | grep -q "386\|i386\|i686"; then \
+			ZLM_DETECTED_ARCH="386"; \
 		else \
-			ZLM_ARCH=$$(file $(ZLM_EMBED_DIR)/MediaServer | grep -o "x86-64\|x86_64\|aarch64\|ARM aarch64" | head -1); \
-			if [ "$(GOARCH)" = "amd64" ] && echo "$$ZLM_ARCH" | grep -q "x86"; then \
-				echo "✓ ZLM 平台检测: x86-64 (与 $(CURRENT_PLATFORM) 兼容)"; \
-				echo "$(CURRENT_PLATFORM)" > $(ZLM_PLATFORM_FILE); \
-			elif [ "$(GOARCH)" = "arm64" ] && echo "$$ZLM_ARCH" | grep -q "aarch64\|ARM"; then \
-				echo "✓ ZLM 平台检测: ARM64 (与 $(CURRENT_PLATFORM) 兼容)"; \
-				echo "$(CURRENT_PLATFORM)" > $(ZLM_PLATFORM_FILE); \
-			else \
-				echo "⚠ ZLM 平台可能不匹配 (ZLM: $$ZLM_ARCH, Target: $(CURRENT_PLATFORM))"; \
-				echo ">>> 重新编译 ZLM for $(CURRENT_PLATFORM)..."; \
-				$(MAKE) build-zlm; \
-			fi \
+			ZLM_DETECTED_ARCH="unknown"; \
+		fi; \
+		echo ">>> ZLM 二进制检测: $$ZLM_DETECTED_ARCH (目标: $(GOARCH))"; \
+		if [ "$$ZLM_DETECTED_ARCH" != "$(GOARCH)" ]; then \
+			echo "⚠ ZLM 平台不匹配: $$ZLM_DETECTED_ARCH != $(GOARCH)"; \
+			echo ">>> 自动重新编译 ZLM for $(CURRENT_PLATFORM)..."; \
+			$(MAKE) build-zlm; \
+		else \
+			echo "✓ ZLM 平台匹配: $(CURRENT_PLATFORM)"; \
+			echo "$(CURRENT_PLATFORM)" > $(ZLM_PLATFORM_FILE); \
 		fi \
 	else \
-		echo "ℹ 未找到嵌入式 ZLM，跳过平台检查"; \
+		echo "ℹ 未找到嵌入式 ZLM ($(ZLM_EMBED_DIR)/MediaServer)"; \
+		echo ">>> 如需嵌入 ZLM，请先运行: make build-zlm"; \
 	fi
 
 # 构建 ZLMediaKit

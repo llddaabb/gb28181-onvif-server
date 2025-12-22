@@ -3,6 +3,7 @@ package ai
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"gb28181-onvif-server/internal/config"
 	"gb28181-onvif-server/internal/debug"
@@ -93,6 +94,22 @@ func (m *AIRecordingManager) StartChannelRecording(channelID string, mode Record
 	// 创建录像器配置
 	config := DefaultRecorderConfig(channelID)
 	config.Mode = mode
+
+	// 应用AI配置
+	if m.aiConfig != nil {
+		config.DetectorConfig.Confidence = m.aiConfig.Confidence
+		config.DetectorConfig.IoUThreshold = m.aiConfig.IoUThreshold
+		config.DetectorConfig.NumThreads = m.aiConfig.NumThreads
+		if m.aiConfig.DetectInterval > 0 {
+			config.DetectInterval = time.Duration(m.aiConfig.DetectInterval) * time.Second
+		}
+		if m.aiConfig.RecordDelay > 0 {
+			config.RecordDelay = time.Duration(m.aiConfig.RecordDelay) * time.Second
+		}
+		if m.aiConfig.MinRecordTime > 0 {
+			config.MinRecordTime = time.Duration(m.aiConfig.MinRecordTime) * time.Second
+		}
+	}
 
 	// 创建录像器
 	recorder, err := NewStreamRecorder(config, m.recordControl)
