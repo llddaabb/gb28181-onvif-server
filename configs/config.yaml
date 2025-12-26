@@ -7,17 +7,17 @@ GB28181:
     HeartbeatInterval: 60
     RegisterExpires: 3600
 ONVIF:
+    MediaPortRange: 8000-9000
+    EnableCheck: true
     CheckInterval: 120
     DiscoveryInterval: 60
-    EnableCheck: true
-    MaxFailedCount: 3
-    MediaPortRange: 8000-9000
+    MaxFailureCount: 0
 API:
     Host: 0.0.0.0
     Port: 9080
-    StaticDir: www
     CorsAllowOrigins:
         - '*'
+    StaticDir: www
 Debug:
     Enabled: true
     LogLevel: info
@@ -64,7 +64,7 @@ ZLM:
         StreamNoneReaderDelayMS: 30000
         MergeWriteMS: 0
         MediaServerId: zpip-server
-        ListenIP: '0.0.0.0'
+        ListenIP: 0.0.0.0
     HLS:
         FileBufSize: 65536
         SegDur: 2
@@ -153,7 +153,7 @@ ZLM:
         VideoCodec: h264
         VideoBitrate: 2000
     RTC:
-        Port: 8000
+        Port: 8003
         TCPPort: 8000
         TimeoutSec: 15
         ExternIP: ""
@@ -170,7 +170,7 @@ ZLM:
         NackRtpSize: 8
         BFilter: false
     SRT:
-        Port: 9000
+        Port: 9001
         TimeoutSec: 5
         LatencyMul: 4
         PktBufSize: 8192
@@ -180,24 +180,22 @@ ZLM:
         MaxReqSize: 1024
 AI:
     Enable: true
-    AutoStart: true                 # 启动时自动开始AI检测
-    DetectorType: http              # 检测器类型: auto(自动), http(外部服务), embedded(纯Go), onnx(ONNX Runtime)
-    APIEndpoint: http://localhost:8001/detect  # HTTP检测器API地址
-    ModelPath: ./models/yolov8s.onnx           # ONNX模型路径
-    Confidence: 0.5                 # 置信度阈值 (0.0-1.0)
-    IoUThreshold: 0.45              # NMS IoU阈值
-    InputSize: 640                  # 输入图像尺寸 (320/640/1280)
-    DetectInterval: 2               # 检测间隔(秒)
-    RecordDelay: 10                 # 录像延迟(秒)
-    MinRecordTime: 5                # 最小录像时长(秒)
-    NumThreads: 0                   # CPU线程数 (0=自动)
-    AutoChannels: []                # 自动启动AI的通道ID列表（空=全部已配置通道）
-
-# 认证配置
+    AutoStart: true
+    DetectorType: "auto"
+    APIEndpoint: "http://localhost:8000/detect"
+    ModelPath: "models/yolov8s.onnx"
+    Confidence: 0.55
+    IoUThreshold: 0.45
+    InputSize: 640
+    DetectInterval: 2
+    RecordDelay: 10
+    MinRecordTime: 0
+    NumThreads: 4
+    AutoChannels: []
 Auth:
-    Enable: true                    # 是否启用认证
-    JWTSecret: ""                   # JWT密钥，为空时自动生成
-    TokenExpiry: 24                 # 令牌过期时间(小时)
-    UsersFile: configs/users.json   # 用户数据文件
-    DefaultAdmin: admin             # 默认管理员账户
-    DefaultPassword: admin123       # 默认管理员密码
+    Enable: true
+    JWTSecret: ""
+    TokenExpiry: 24
+    UsersFile: configs/users.json
+    DefaultAdmin: admin
+    DefaultPassword: admin123

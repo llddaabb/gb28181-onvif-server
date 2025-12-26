@@ -11,6 +11,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -796,4 +797,514 @@ func (c *SOAPClient) GetPresets(profileToken string) ([]PTZPreset, error) {
 func (c *SOAPClient) TestConnection() error {
 	_, err := c.GetSystemDateAndTime()
 	return err
+}
+
+// ============================================================================
+// Recording Search 录像搜索相关方法
+// ============================================================================
+
+// RecordingSearchItem ONVIF 录像搜索结果项
+type RecordingSearchItem struct {
+	RecordingToken string    `json:"recordingToken"`
+	Name           string    `json:"name"`
+	Source         string    `json:"source"`
+	Content        string    `json:"content"`
+	Track          string    `json:"track"`
+	StartTime      time.Time `json:"startTime"`
+	EndTime        time.Time `json:"endTime"`
+}
+
+// GetRecordingSearchResults 获取录像搜索结果
+type GetRecordingSearchResults struct {
+	SearchToken string                `json:"searchToken"`
+	ResultList  []RecordingSearchItem `json:"resultList"`
+	SearchState string                `json:"searchState"` // Searching, Completed, Unknown
+}
+
+// FindRecordings 查找设备上的录像
+// 参数: startTime, endTime 为 ISO 8601 格式
+func (c *SOAPClient) FindRecordings(startTime, endTime string) (*GetRecordingSearchResults, error) {
+	// 首先获取 Recording Search 服务地址
+	searchAddr, err := c.getRecordingSearchServiceAddress()
+	if err != nil {
+		return nil, fmt.Errorf("获取录像搜索服务地址失败: %w", err)
+	}
+
+	// 构建 FindRecordings 请求
+	body := `<tse:FindRecordings xmlns:tse="http://www.onvif.org/ver10/search/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <tse:Scope>
+      <tt:IncludedSources/>
+      <tt:IncludedRecordings/>
+      <tt:RecordingInformationFilter/>
+    </tse:Scope>
+    <tse:MaxMatches>100</tse:MaxMatches>
+    <tse:KeepAliveTime>PT60S</tse:KeepAliveTime>
+  </tse:FindRecordings>`
+
+	resp, err := c.callSOAPOnEndpoint(searchAddr, "http://www.onvif.org/ver10/search/wsdl/FindRecordings", body)
+	if err != nil {
+		return nil, fmt.Errorf("FindRecordings 请求失败: %w", err)
+	}
+
+	// 解析 SearchToken
+	searchToken := extractXMLValue(resp, "SearchToken")
+	if searchToken == "" {
+		return nil, fmt.Errorf("未获取到 SearchToken")
+	}
+
+	// 获取搜索结果
+	return c.getRecordingSearchResults(searchAddr, searchToken)
+}
+
+// getRecordingSearchServiceAddress 获取录像搜索服务地址
+func (c *SOAPClient) getRecordingSearchServiceAddress() (string, error) {
+	// 先尝试从 capabilities 获取
+	body := `<GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl">
+    <Category>All</Category>
+  </GetCapabilities>`
+
+	resp, err := c.callSOAP("http://www.onvif.org/ver10/device/wsdl/GetCapabilities", body)
+	if err != nil {
+		return "", err
+	}
+
+	// 解析 Search 服务地址
+	decoder := xml.NewDecoder(strings.NewReader(resp))
+	inSearch := false
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "Search" {
+				inSearch = true
+			} else if t.Name.Local == "XAddr" && inSearch {
+				var xaddr string
+				if err := decoder.DecodeElement(&xaddr, &t); err == nil && xaddr != "" {
+					return xaddr, nil
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "Search" {
+				inSearch = false
+			}
+		}
+	}
+
+	// 如果没有找到，尝试使用默认的 search 服务路径
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return "", fmt.Errorf("解析端点地址失败: %w", err)
+	}
+	u.Path = "/onvif/search_service"
+	return u.String(), nil
+}
+
+// getRecordingSearchResults 获取录像搜索结果
+func (c *SOAPClient) getRecordingSearchResults(searchAddr, searchToken string) (*GetRecordingSearchResults, error) {
+	body := fmt.Sprintf(`<tse:GetRecordingSearchResults xmlns:tse="http://www.onvif.org/ver10/search/wsdl">
+    <tse:SearchToken>%s</tse:SearchToken>
+    <tse:MinResults>1</tse:MinResults>
+    <tse:MaxResults>100</tse:MaxResults>
+    <tse:WaitTime>PT5S</tse:WaitTime>
+  </tse:GetRecordingSearchResults>`, searchToken)
+
+	resp, err := c.callSOAPOnEndpoint(searchAddr, "http://www.onvif.org/ver10/search/wsdl/GetRecordingSearchResults", body)
+	if err != nil {
+		return nil, fmt.Errorf("GetRecordingSearchResults 请求失败: %w", err)
+	}
+
+	result := &GetRecordingSearchResults{
+		SearchToken: searchToken,
+		ResultList:  make([]RecordingSearchItem, 0),
+	}
+
+	// 解析搜索状态
+	result.SearchState = extractXMLValue(resp, "SearchState")
+
+	// 解析录像列表
+	decoder := xml.NewDecoder(strings.NewReader(resp))
+	var currentItem *RecordingSearchItem
+	inRecordingInformation := false
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "RecordingInformation":
+				inRecordingInformation = true
+				currentItem = &RecordingSearchItem{}
+				// 获取 RecordingToken 属性
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "token" {
+						currentItem.RecordingToken = attr.Value
+					}
+				}
+			case "RecordingToken":
+				if inRecordingInformation && currentItem != nil {
+					var token string
+					decoder.DecodeElement(&token, &t)
+					currentItem.RecordingToken = token
+				}
+			case "Name":
+				if inRecordingInformation && currentItem != nil {
+					var name string
+					decoder.DecodeElement(&name, &t)
+					currentItem.Name = name
+				}
+			case "Source":
+				if inRecordingInformation && currentItem != nil {
+					var source string
+					decoder.DecodeElement(&source, &t)
+					currentItem.Source = source
+				}
+			case "Content":
+				if inRecordingInformation && currentItem != nil {
+					var content string
+					decoder.DecodeElement(&content, &t)
+					currentItem.Content = content
+				}
+			case "EarliestRecording", "StartTime":
+				if inRecordingInformation && currentItem != nil {
+					var timeStr string
+					decoder.DecodeElement(&timeStr, &t)
+					if t, err := time.Parse(time.RFC3339, timeStr); err == nil {
+						currentItem.StartTime = t
+					}
+				}
+			case "LatestRecording", "EndTime":
+				if inRecordingInformation && currentItem != nil {
+					var timeStr string
+					decoder.DecodeElement(&timeStr, &t)
+					if t, err := time.Parse(time.RFC3339, timeStr); err == nil {
+						currentItem.EndTime = t
+					}
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "RecordingInformation" {
+				inRecordingInformation = false
+				if currentItem != nil && currentItem.RecordingToken != "" {
+					result.ResultList = append(result.ResultList, *currentItem)
+				}
+				currentItem = nil
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// GetRecordings 获取设备上的所有录像 (Recording Control 服务)
+func (c *SOAPClient) GetRecordings() ([]RecordingSearchItem, error) {
+	// 获取 Recording Control 服务地址
+	recordingAddr, err := c.getRecordingControlServiceAddress()
+	if err != nil {
+		// 如果获取失败，尝试使用 Search 服务
+		return c.getRecordingsViaSearch()
+	}
+
+	body := `<trc:GetRecordings xmlns:trc="http://www.onvif.org/ver10/recording/wsdl"/>`
+
+	resp, err := c.callSOAPOnEndpoint(recordingAddr, "http://www.onvif.org/ver10/recording/wsdl/GetRecordings", body)
+	if err != nil {
+		// 如果失败，尝试使用 Search 服务
+		return c.getRecordingsViaSearch()
+	}
+
+	var recordings []RecordingSearchItem
+
+	// 解析录像列表
+	decoder := xml.NewDecoder(strings.NewReader(resp))
+	var currentItem *RecordingSearchItem
+	inRecordingItem := false
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "RecordingItem":
+				inRecordingItem = true
+				currentItem = &RecordingSearchItem{}
+			case "RecordingToken":
+				if inRecordingItem && currentItem != nil {
+					var token string
+					decoder.DecodeElement(&token, &t)
+					currentItem.RecordingToken = token
+				}
+			case "Name":
+				if inRecordingItem && currentItem != nil {
+					var name string
+					decoder.DecodeElement(&name, &t)
+					currentItem.Name = name
+				}
+			case "Content":
+				if inRecordingItem && currentItem != nil {
+					var content string
+					decoder.DecodeElement(&content, &t)
+					currentItem.Content = content
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "RecordingItem" {
+				inRecordingItem = false
+				if currentItem != nil && currentItem.RecordingToken != "" {
+					recordings = append(recordings, *currentItem)
+				}
+				currentItem = nil
+			}
+		}
+	}
+
+	return recordings, nil
+}
+
+// getRecordingsViaSearch 通过 Search 服务获取录像
+func (c *SOAPClient) getRecordingsViaSearch() ([]RecordingSearchItem, error) {
+	result, err := c.FindRecordings("", "")
+	if err != nil {
+		return nil, err
+	}
+	return result.ResultList, nil
+}
+
+// getRecordingControlServiceAddress 获取录像控制服务地址
+func (c *SOAPClient) getRecordingControlServiceAddress() (string, error) {
+	body := `<GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl">
+    <Category>All</Category>
+  </GetCapabilities>`
+
+	resp, err := c.callSOAP("http://www.onvif.org/ver10/device/wsdl/GetCapabilities", body)
+	if err != nil {
+		return "", err
+	}
+
+	// 解析 Recording 服务地址
+	decoder := xml.NewDecoder(strings.NewReader(resp))
+	inRecording := false
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "Recording" {
+				inRecording = true
+			} else if t.Name.Local == "XAddr" && inRecording {
+				var xaddr string
+				if err := decoder.DecodeElement(&xaddr, &t); err == nil && xaddr != "" {
+					return xaddr, nil
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "Recording" {
+				inRecording = false
+			}
+		}
+	}
+
+	return "", fmt.Errorf("设备不支持 Recording 服务")
+}
+
+// FindRecordingsByTime 按时间范围查找录像
+func (c *SOAPClient) FindRecordingsByTime(startTime, endTime time.Time) ([]RecordingSearchItem, error) {
+	searchAddr, err := c.getRecordingSearchServiceAddress()
+	if err != nil {
+		return nil, fmt.Errorf("获取录像搜索服务地址失败: %w", err)
+	}
+
+	// 格式化时间为 ISO 8601
+	startTimeStr := startTime.UTC().Format(time.RFC3339)
+	endTimeStr := endTime.UTC().Format(time.RFC3339)
+
+	// FindEvents 可能更适合按时间查询
+	body := fmt.Sprintf(`<tse:FindEvents xmlns:tse="http://www.onvif.org/ver10/search/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <tse:StartPoint>%s</tse:StartPoint>
+    <tse:EndPoint>%s</tse:EndPoint>
+    <tse:Scope>
+      <tt:IncludedSources/>
+      <tt:IncludedRecordings/>
+    </tse:Scope>
+    <tse:SearchFilter>
+      <tt:TopicExpression Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">
+        tns1:RecordingHistory/Track/State
+      </tt:TopicExpression>
+    </tse:SearchFilter>
+    <tse:IncludeStartState>true</tse:IncludeStartState>
+    <tse:MaxMatches>100</tse:MaxMatches>
+    <tse:KeepAliveTime>PT60S</tse:KeepAliveTime>
+  </tse:FindEvents>`, startTimeStr, endTimeStr)
+
+	resp, err := c.callSOAPOnEndpoint(searchAddr, "http://www.onvif.org/ver10/search/wsdl/FindEvents", body)
+	if err != nil {
+		// FindEvents 失败时尝试 FindRecordings
+		result, err := c.FindRecordings(startTimeStr, endTimeStr)
+		if err != nil {
+			return nil, err
+		}
+		return result.ResultList, nil
+	}
+
+	// 解析 SearchToken
+	searchToken := extractXMLValue(resp, "SearchToken")
+	if searchToken == "" {
+		// 尝试使用 FindRecordings
+		result, err := c.FindRecordings(startTimeStr, endTimeStr)
+		if err != nil {
+			return nil, err
+		}
+		return result.ResultList, nil
+	}
+
+	// 获取事件搜索结果
+	result, err := c.getRecordingSearchResults(searchAddr, searchToken)
+	if err != nil {
+		return nil, err
+	}
+
+	// 过滤时间范围内的录像
+	var filtered []RecordingSearchItem
+	for _, item := range result.ResultList {
+		// 如果录像时间范围与查询时间有重叠
+		if !item.EndTime.Before(startTime) && !item.StartTime.After(endTime) {
+			filtered = append(filtered, item)
+		}
+	}
+
+	return filtered, nil
+}
+
+// GetReplayUri 获取录像回放地址
+func (c *SOAPClient) GetReplayUri(recordingToken, streamType string) (string, error) {
+	// 获取 Replay 服务地址
+	replayAddr, err := c.getReplayServiceAddress()
+	if err != nil {
+		return "", fmt.Errorf("获取回放服务地址失败: %w", err)
+	}
+
+	if streamType == "" {
+		streamType = "RTP-Unicast"
+	}
+
+	body := fmt.Sprintf(`<trp:GetReplayUri xmlns:trp="http://www.onvif.org/ver10/replay/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <trp:StreamSetup>
+      <tt:Stream>%s</tt:Stream>
+      <tt:Transport>
+        <tt:Protocol>RTSP</tt:Protocol>
+      </tt:Transport>
+    </trp:StreamSetup>
+    <trp:RecordingToken>%s</trp:RecordingToken>
+  </trp:GetReplayUri>`, streamType, recordingToken)
+
+	resp, err := c.callSOAPOnEndpoint(replayAddr, "http://www.onvif.org/ver10/replay/wsdl/GetReplayUri", body)
+	if err != nil {
+		return "", fmt.Errorf("GetReplayUri 请求失败: %w", err)
+	}
+
+	// 解析 Uri
+	uri := extractXMLValue(resp, "Uri")
+	if uri == "" {
+		return "", fmt.Errorf("未获取到回放地址")
+	}
+
+	return uri, nil
+}
+
+// getReplayServiceAddress 获取回放服务地址
+func (c *SOAPClient) getReplayServiceAddress() (string, error) {
+	body := `<GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl">
+    <Category>All</Category>
+  </GetCapabilities>`
+
+	resp, err := c.callSOAP("http://www.onvif.org/ver10/device/wsdl/GetCapabilities", body)
+	if err != nil {
+		return "", err
+	}
+
+	// 解析 Replay 服务地址
+	decoder := xml.NewDecoder(strings.NewReader(resp))
+	inReplay := false
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "Replay" {
+				inReplay = true
+			} else if t.Name.Local == "XAddr" && inReplay {
+				var xaddr string
+				if err := decoder.DecodeElement(&xaddr, &t); err == nil && xaddr != "" {
+					return xaddr, nil
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "Replay" {
+				inReplay = false
+			}
+		}
+	}
+
+	// 尝试默认路径
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return "", fmt.Errorf("设备不支持 Replay 服务")
+	}
+	u.Path = "/onvif/replay_service"
+	return u.String(), nil
+}
+
+// extractXMLValue 从 XML 中提取指定标签的值
+func extractXMLValue(xmlStr, tagName string) string {
+	decoder := xml.NewDecoder(strings.NewReader(xmlStr))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		if se, ok := token.(xml.StartElement); ok {
+			if se.Name.Local == tagName {
+				var value string
+				decoder.DecodeElement(&value, &se)
+				return value
+			}
+		}
+	}
+	return ""
 }

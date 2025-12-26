@@ -627,3 +627,84 @@ func respondOK(w http.ResponseWriter, message string) {
 		"message": message,
 	})
 }
+
+// handleONVIFQueryRecordings 查询ONVIF设备录像列表
+func (s *Server) handleONVIFQueryRecordings(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	deviceID := vars["id"]
+
+	if deviceID == "" {
+		respondBadRequest(w, "设备ID不能为空")
+		return
+	}
+
+	// 获取时间参数
+	startTimeStr := r.URL.Query().Get("startTime")
+	endTimeStr := r.URL.Query().Get("endTime")
+
+	var recordings []onvif.ONVIFRecordInfo
+	var err error
+
+	if startTimeStr != "" && endTimeStr != "" {
+		// 按时间范围查询
+		startTime, err1 := time.Parse("2006-01-02T15:04:05", startTimeStr)
+		endTime, err2 := time.Parse("2006-01-02T15:04:05", endTimeStr)
+		if err1 != nil || err2 != nil {
+			// 尝试日期格式
+			startTime, err1 = time.Parse("2006-01-02", startTimeStr)
+			endTime, err2 = time.Parse("2006-01-02", endTimeStr)
+			if err1 != nil || err2 != nil {
+				respondBadRequest(w, "时间格式无效，请使用 2006-01-02T15:04:05 或 2006-01-02 格式")
+				return
+			}
+			// 日期格式时，结束时间设为当天最后一秒
+			endTime = endTime.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+		}
+		recordings, err = s.onvifManager.QueryRecordingsByTime(deviceID, startTime, endTime)
+	} else {
+		// 查询所有录像
+		recordings, err = s.onvifManager.QueryRecordings(deviceID)
+	}
+
+	if err != nil {
+		respondInternalError(w, fmt.Sprintf("查询录像失败: %v", err))
+		return
+	}
+
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success":    true,
+		"deviceId":   deviceID,
+		"count":      len(recordings),
+		"recordings": recordings,
+	})
+}
+
+// handleONVIFGetReplayUri 获取ONVIF设备录像回放地址
+func (s *Server) handleONVIFGetReplayUri(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	deviceID := vars["id"]
+	recordingToken := r.URL.Query().Get("recordingToken")
+
+	if deviceID == "" {
+		respondBadRequest(w, "设备ID不能为空")
+		return
+	}
+
+	if recordingToken == "" {
+		respondBadRequest(w, "录像Token不能为空")
+		return
+	}
+
+	uri, err := s.onvifManager.GetRecordingReplayUri(deviceID, recordingToken)
+	if err != nil {
+		respondInternalError(w, fmt.Sprintf("获取回放地址失败: %v", err))
+		return
+	}
+
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success":        true,
+		"deviceId":       deviceID,
+		"recordingToken": recordingToken,
+		"replayUri":      uri,
+	})
+}

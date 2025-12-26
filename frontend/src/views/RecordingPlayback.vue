@@ -37,9 +37,9 @@
               <el-select v-model="selectedChannel" placeholder="请选择通道">
                 <el-option 
                   v-for="channel in availableChannels" 
-                  :key="channel.channelId" 
-                  :label="channel.channelName" 
-                  :value="channel.channelId"
+                  :key="channel.channelId || channel.ChannelID" 
+                  :label="channel.channelName || channel.name || channel.Name || channel.channelId || channel.ChannelID" 
+                  :value="channel.channelId || channel.ChannelID"
                 />
               </el-select>
             </el-col>
@@ -53,7 +53,9 @@
               />
             </el-col>
             <el-col :span="6">
-              <el-button type="primary" @click="queryRecordings">查询录像</el-button>
+              <el-button type="primary" @click="queryRecordings" :loading="deviceRecordingLoading">
+                查询录像
+              </el-button>
             </el-col>
           </el-row>
 
@@ -98,7 +100,7 @@
           <el-row :gutter="20" class="query-section">
             <el-col :span="6">
               <label>选择通道</label>
-              <el-select v-model="zlmSelectedChannel" placeholder="请选择通道">
+              <el-select v-model="zlmSelectedChannel" placeholder="请选择通道" @change="onZlmChannelChange">
                 <el-option 
                   v-for="channel in channels" 
                   :key="channel.channelId" 
@@ -114,6 +116,9 @@
                 type="date" 
                 placeholder="选择日期"
                 style="width: 100%"
+                :disabled-date="disabledDate"
+                :cell-class-name="getDateCellClass"
+                @panel-change="onCalendarPanelChange"
               />
             </el-col>
             <el-col :span="6">
@@ -331,28 +336,60 @@
     <!-- 回放窗口 -->
     <el-dialog 
       v-model="playbackDialogVisible" 
-      :title="`录像回放 - ${selectedRecording?.channelName || currentPlayback.fileName}`" 
+      :title="`录像回放 - ${currentPlayback.fileName || selectedRecording?.channelName || '未知'}`" 
       width="80%"
+      :close-on-click-modal="false"
+      @close="onPlaybackDialogClose"
     >
       <div class="playback-content">
-        <div class="video-player">
-          <video 
-            v-if="currentPlayback.playUrl"
-            ref="videoPlayer"
-            :src="currentPlayback.playUrl" 
-            controls 
-            autoplay
-            style="width: 100%; max-height: 500px; background: #000;"
+        <!-- 使用 PlaybackPlayer 组件 -->
+        <PlaybackPlayer
+          v-if="playbackDialogVisible && (currentPlayback.playUrl || currentPlayback.flvUrl)"
+          :play-url="currentPlayback.playUrl"
+          :flv-url="currentPlayback.flvUrl"
+          :mp4-url="currentPlayback.mp4Url"
+          :download-url="currentPlayback.downloadUrl"
+          :recording-info="currentPlayback"
+          :default-height="480"
+          :autoplay="true"
+          @playing="onPlaybackPlaying"
+          @ended="onPlaybackEnded"
+          @error="onPlaybackError"
+        />
+        
+        <!-- 录像信息 -->
+        <div v-if="currentPlayback.fileName" class="playback-info" style="margin-top: 20px;">
+          <el-alert 
+            v-if="currentPlayback.note"
+            :title="currentPlayback.note" 
+            type="info" 
+            :closable="false"
+            style="margin-bottom: 15px;"
           />
-          <video 
-            v-else-if="selectedRecording?.playbackUrl"
-            ref="videoPlayer"
-            :src="selectedRecording?.playbackUrl" 
-            controls 
-            style="width: 100%; max-height: 500px; background: #000;"
-          />
+          <el-descriptions :column="3" border>
+            <el-descriptions-item label="文件名">{{ currentPlayback.fileName }}</el-descriptions-item>
+            <el-descriptions-item label="应用">{{ currentPlayback.app }}</el-descriptions-item>
+            <el-descriptions-item label="流ID">{{ currentPlayback.stream }}</el-descriptions-item>
+            <el-descriptions-item label="文件大小">{{ currentPlayback.fileSize || currentPlayback.size }}</el-descriptions-item>
+            <el-descriptions-item label="修改时间">{{ currentPlayback.modTime }}</el-descriptions-item>
+            <el-descriptions-item label="播放模式">
+              <el-tag :type="currentPlayback.flvUrl ? 'success' : 'info'">
+                {{ currentPlayback.flvUrl ? 'FLV 流' : 'MP4 直播' }}
+              </el-tag>
+            </el-descriptions-item>
+          </el-descriptions>
+          <div style="margin-top: 15px; text-align: center;">
+            <el-button type="success" @click="downloadFile(currentPlayback.downloadUrl || currentPlayback.mp4Url, currentPlayback.fileName)">
+              <el-icon><Download /></el-icon> 下载录像文件
+            </el-button>
+            <el-button @click="copyToClipboard(currentPlayback.playUrl)">
+              <el-icon><CopyDocument /></el-icon> 复制播放地址
+            </el-button>
+          </div>
         </div>
-        <div v-if="selectedRecording" class="playback-info" style="margin-top: 20px;">
+        
+        <!-- 设备端录像信息 -->
+        <div v-if="selectedRecording && !currentPlayback.fileName" class="playback-info" style="margin-top: 20px;">
           <el-descriptions :column="4" border>
             <el-descriptions-item label="录像ID">{{ selectedRecording?.recordingId }}</el-descriptions-item>
             <el-descriptions-item label="通道">{{ selectedRecording?.channelName }}</el-descriptions-item>
@@ -365,49 +402,8 @@
                 {{ selectedRecording?.status === 'complete' ? '完整' : '进行中' }}
               </el-tag>
             </el-descriptions-item>
-            <el-descriptions-item label="帧率">{{ selectedRecording?.frameRate || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="类型">{{ selectedRecording?.type || '-' }}</el-descriptions-item>
           </el-descriptions>
-        </div>
-        <div v-if="currentPlayback.fileName" class="playback-info" style="margin-top: 20px;">
-          <el-alert 
-            v-if="currentPlayback.note"
-            :title="currentPlayback.note" 
-            type="warning" 
-            :closable="false"
-            style="margin-bottom: 15px;"
-          />
-          <el-descriptions :column="3" border>
-            <el-descriptions-item label="文件名">{{ currentPlayback.fileName }}</el-descriptions-item>
-            <el-descriptions-item label="应用">{{ currentPlayback.app }}</el-descriptions-item>
-            <el-descriptions-item label="流ID">{{ currentPlayback.stream }}</el-descriptions-item>
-            <el-descriptions-item label="文件大小">{{ currentPlayback.size }}</el-descriptions-item>
-            <el-descriptions-item label="修改时间">{{ currentPlayback.modTime }}</el-descriptions-item>
-            <el-descriptions-item label="播放地址">
-              <el-link :href="currentPlayback.playUrl" target="_blank" type="primary">
-                打开播放地址
-              </el-link>
-            </el-descriptions-item>
-          </el-descriptions>
-          <div style="margin-top: 15px; text-align: center;">
-            <el-button type="success" @click="downloadFile(currentPlayback.playUrl, currentPlayback.fileName)">
-              <el-icon><Download /></el-icon> 下载录像文件
-            </el-button>
-            <el-button @click="copyToClipboard(currentPlayback.playUrl)">
-              <el-icon><CopyDocument /></el-icon> 复制播放地址
-            </el-button>
-          </div>
-        </div>
-        <div v-if="!currentPlayback.playUrl && selectedRecording" class="timeline-info" style="margin-top: 20px;">
-          <el-slider 
-            v-model="playbackProgress" 
-            :max="playbackDuration" 
-            range 
-            marks
-            style="margin-bottom: 10px;"
-          />
-          <div style="text-align: center;">
-            <span>{{ formatTime(playbackProgress) }} / {{ formatTime(playbackDuration) }}</span>
-          </div>
         </div>
       </div>
     </el-dialog>
@@ -419,6 +415,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { Refresh, VideoPlay, VideoPause, Download, CopyDocument } from '@element-plus/icons-vue'
+import PlaybackPlayer from '../components/PlaybackPlayer.vue'
 
 interface Recording {
   recordingId: string
@@ -488,13 +485,22 @@ const zlmRecordPath = ref('')
 const zlmLoading = ref(false)
 const zlmSelectedChannel = ref('')
 const zlmQueryDate = ref(new Date())
+const zlmRecordingDates = ref<string[]>([]) // 有录像的日期列表
+const zlmCalendarYear = ref(new Date().getFullYear())
+const zlmCalendarMonth = ref(new Date().getMonth() + 1)
 const currentPlayback = ref({
   fileName: '',
   app: '',
   stream: '',
   size: '',
+  fileSize: '',
   modTime: '',
   playUrl: '',
+  flvUrl: '',
+  mp4Url: '',
+  downloadUrl: '',
+  streamKey: '',
+  gb28181StreamId: '', // GB28181 回放流 ID
   note: ''
 })
 
@@ -536,15 +542,46 @@ const aiRecordingList = computed(() => {
 
 const availableChannels = computed(() => {
   if (!selectedDevice.value) return []
-  return channels.value.filter(ch => ch.deviceId === selectedDevice.value)
+  
+  // 检查是否是 GB28181 设备
+  const gb28181Device = gb28181Devices.value.find(d => d.deviceId === selectedDevice.value)
+  if (gb28181Device) {
+    // GB28181 设备的通道 - 兼容不同字段名
+    const deviceChannels = (gb28181Device as any).channels || (gb28181Device as any).Channels || []
+    return deviceChannels.map((ch: any) => ({
+      channelId: ch.channelId || ch.ChannelID,
+      channelName: ch.name || ch.Name || ch.channelId || ch.ChannelID
+    }))
+  }
+  
+  // 检查是否是 ONVIF 设备（ONVIF 设备通常只有一个默认通道）
+  const onvifDevice = onvifDevices.value.find(d => d.deviceId === selectedDevice.value)
+  if (onvifDevice) {
+    // 为 ONVIF 设备创建一个虚拟通道
+    return [{
+      channelId: selectedDevice.value,
+      channelName: (onvifDevice as any).name || (onvifDevice as any).Name || selectedDevice.value
+    }]
+  }
+  
+  return []
+})
+
+// 判断设备类型
+const isGB28181Device = computed(() => {
+  return gb28181Devices.value.some(d => d.deviceId === selectedDevice.value)
+})
+
+const isONVIFDevice = computed(() => {
+  return onvifDevices.value.some(d => d.deviceId === selectedDevice.value)
 })
 
 const fetchDevices = async () => {
   try {
-    const gb28181Response = await axios.get('http://localhost:9080/api/gb28181/devices')
+    const gb28181Response = await axios.get('/api/gb28181/devices')
     gb28181Devices.value = gb28181Response.data.devices || []
     
-    const onvifResponse = await axios.get('http://localhost:9080/api/onvif/devices')
+    const onvifResponse = await axios.get('/api/onvif/devices')
     onvifDevices.value = onvifResponse.data.devices || []
   } catch (error) {
     console.error('获取设备列表失败:', error)
@@ -553,12 +590,15 @@ const fetchDevices = async () => {
 
 const fetchChannels = async () => {
   try {
-    const response = await axios.get('http://localhost:9080/api/channel/list')
+    const response = await axios.get('/api/channel/list')
     channels.value = response.data.channels || []
   } catch (error) {
     console.error('获取通道列表失败:', error)
   }
 }
+
+// 设备录像查询加载状态
+const deviceRecordingLoading = ref(false)
 
 const queryRecordings = async () => {
   if (!selectedDevice.value || !selectedChannel.value) {
@@ -566,37 +606,250 @@ const queryRecordings = async () => {
     return
   }
 
+  deviceRecordingLoading.value = true
+  recordings.value = []
+
   try {
     const dateStr = queryDate.value instanceof Date 
       ? queryDate.value.toISOString().split('T')[0]
       : queryDate.value
-
-    const response = await axios.get('http://localhost:9080/api/recording/query', {
-      params: {
-        deviceId: selectedDevice.value,
-        channelId: selectedChannel.value,
-        date: dateStr
-      }
-    })
     
-    recordings.value = response.data.recordings || []
-  } catch (error) {
-    ElMessage.error('查询录像失败')
+    // 转换为 GB28181 要求的时间格式
+    const startTime = `${dateStr}T00:00:00`
+    const endTime = `${dateStr}T23:59:59`
+
+    if (isGB28181Device.value) {
+      // GB28181 设备录像查询 - 先发送查询请求
+      await axios.get('/api/gb28181/record/query', {
+        params: {
+          channelId: selectedChannel.value,
+          startTime: startTime,
+          endTime: endTime,
+          type: 'all'
+        }
+      })
+      
+      ElMessage.info('录像查询请求已发送，正在等待设备响应...')
+      
+      // 等待设备响应，然后获取结果（轮询最多10次，每次间隔1秒）
+      let attempts = 0
+      const maxAttempts = 10
+      
+      const pollResults = async () => {
+        attempts++
+        try {
+          const resultResponse = await axios.get('/api/gb28181/record/list', {
+            params: { channelId: selectedChannel.value }
+          })
+          
+          if (resultResponse.data.success && resultResponse.data.count > 0) {
+            // 获取到结果，转换格式
+            const deviceRecords = resultResponse.data.records || []
+            recordings.value = deviceRecords.map((rec: any, index: number) => ({
+              recordingId: `gb28181_${selectedChannel.value}_${index}`,
+              channelId: rec.channelId,
+              channelName: rec.name || selectedChannel.value,
+              startTime: rec.startTime,
+              endTime: rec.endTime,
+              duration: calculateDuration(rec.startTime, rec.endTime),
+              fileSize: rec.fileSize ? formatFileSize(rec.fileSize) : '-',
+              status: 'complete',
+              type: rec.type || 'all',
+              filePath: rec.filePath
+            }))
+            
+            ElMessage.success(`查询到 ${recordings.value.length} 条录像`)
+            deviceRecordingLoading.value = false
+          } else if (attempts < maxAttempts) {
+            // 继续轮询
+            setTimeout(pollResults, 1000)
+          } else {
+            // 超时
+            ElMessage.warning('未查询到录像或设备响应超时')
+            deviceRecordingLoading.value = false
+          }
+        } catch (error) {
+          if (attempts < maxAttempts) {
+            setTimeout(pollResults, 1000)
+          } else {
+            deviceRecordingLoading.value = false
+          }
+        }
+      }
+      
+      // 开始轮询
+      setTimeout(pollResults, 1500)
+      
+    } else if (isONVIFDevice.value) {
+      // ONVIF 设备录像查询
+      const response = await axios.get(`/api/onvif/devices/${encodeURIComponent(selectedDevice.value)}/recordings`, {
+        params: {
+          startTime: startTime,
+          endTime: endTime
+        }
+      })
+      
+      if (response.data.success) {
+        const onvifRecords = response.data.recordings || []
+        recordings.value = onvifRecords.map((rec: any, index: number) => ({
+          recordingId: rec.recordingToken || `onvif_${selectedDevice.value}_${index}`,
+          channelId: selectedDevice.value,
+          channelName: rec.name || selectedDevice.value,
+          startTime: rec.startTime ? new Date(rec.startTime).toLocaleString('zh-CN') : '-',
+          endTime: rec.endTime ? new Date(rec.endTime).toLocaleString('zh-CN') : '-',
+          duration: calculateDuration(rec.startTime, rec.endTime),
+          fileSize: '-',
+          status: 'complete',
+          recordingToken: rec.recordingToken
+        }))
+        
+        ElMessage.success(`查询到 ${recordings.value.length} 条录像`)
+      } else {
+        ElMessage.warning('未查询到录像')
+      }
+      deviceRecordingLoading.value = false
+    } else {
+      ElMessage.error('未知的设备类型')
+      deviceRecordingLoading.value = false
+    }
+  } catch (error: any) {
+    ElMessage.error('查询录像失败: ' + (error.response?.data?.error || error.message))
     console.error('查询录像失败:', error)
+    deviceRecordingLoading.value = false
   }
 }
 
-const playbackRecording = (recording: Recording) => {
+// 计算时长
+const calculateDuration = (startTime: string, endTime: string): string => {
+  try {
+    const start = new Date(startTime)
+    const end = new Date(endTime)
+    const diffMs = end.getTime() - start.getTime()
+    if (isNaN(diffMs) || diffMs < 0) return '-'
+    
+    const hours = Math.floor(diffMs / 3600000)
+    const minutes = Math.floor((diffMs % 3600000) / 60000)
+    const seconds = Math.floor((diffMs % 60000) / 1000)
+    
+    if (hours > 0) {
+      return `${hours}时${minutes}分${seconds}秒`
+    } else if (minutes > 0) {
+      return `${minutes}分${seconds}秒`
+    } else {
+      return `${seconds}秒`
+    }
+  } catch {
+    return '-'
+  }
+}
+
+// 格式化文件大小
+const formatFileSize = (bytes: number): string => {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
+}
+
+const playbackRecording = async (recording: Recording) => {
   selectedRecording.value = recording
+  
+  // 重置当前回放状态
+  currentPlayback.value = {
+    fileName: '',
+    app: '',
+    stream: '',
+    size: '',
+    fileSize: recording.fileSize,
+    modTime: '',
+    playUrl: '',
+    flvUrl: '',
+    mp4Url: '',
+    downloadUrl: '',
+    streamKey: '',
+    gb28181StreamId: '',
+    note: ''
+  }
+  
+  // 根据设备类型获取回放地址
+  if (isGB28181Device.value) {
+    // GB28181 设备录像回放 - 需要通过 INVITE 建立会话
+    try {
+      ElMessage.info('正在请求设备端录像回放...')
+      
+      const response = await axios.post('/api/gb28181/record/playback', {
+        channelId: recording.channelId,
+        startTime: recording.startTime,
+        endTime: recording.endTime
+      })
+      
+      if (response.data.success) {
+        currentPlayback.value.gb28181StreamId = response.data.streamId || ''
+        currentPlayback.value.note = `GB28181 设备端录像回放 - 正在等待设备推流（约3-5秒）`
+        
+        // 先打开对话框显示等待状态
+        playbackDialogVisible.value = true
+        playbackProgress.value = 0
+        playbackDuration.value = 3600
+        
+        // 延迟 3 秒后再设置播放地址，给设备时间建立 RTP 连接
+        ElMessage.info('等待设备推流中，请稍候...')
+        await new Promise(resolve => setTimeout(resolve, 3000))
+        
+        // 设置播放地址（延迟后）
+        currentPlayback.value.playUrl = response.data.playUrl || ''
+        currentPlayback.value.flvUrl = response.data.flvUrl || response.data.wsFlvUrl || ''
+        currentPlayback.value.note = `GB28181 设备端录像回放 (流ID: ${response.data.streamId || ''}, SSRC: ${response.data.ssrc || ''})`
+        
+        ElMessage.success('设备推流已建立，开始播放')
+        return // 提前返回，避免重复打开对话框
+      } else {
+        ElMessage.warning('GB28181 设备端录像回放暂不支持，请直接在设备端查看')
+      }
+    } catch (error: any) {
+      console.error('GB28181 录像回放失败:', error)
+      ElMessage.warning(error.response?.data?.error || 'GB28181 设备端录像回放功能开发中')
+    }
+  } else if (isONVIFDevice.value) {
+    // ONVIF 设备录像回放 - 通过 GetReplayUri
+    if ((recording as any).recordingToken) {
+      try {
+        const response = await axios.get(`/api/onvif/devices/${encodeURIComponent(selectedDevice.value)}/replay-uri`, {
+          params: { recordingToken: (recording as any).recordingToken }
+        })
+        
+        if (response.data.success && response.data.replayUri) {
+          // 通过 ZLM 代理 RTSP 回放流
+          const proxyResponse = await axios.post('/api/stream/proxy', {
+            url: response.data.replayUri,
+            app: 'playback',
+            stream: `onvif_${Date.now()}`
+          })
+          
+          if (proxyResponse.data.success) {
+            currentPlayback.value.playUrl = proxyResponse.data.flvUrl || proxyResponse.data.playUrl
+            currentPlayback.value.flvUrl = proxyResponse.data.flvUrl || ''
+            currentPlayback.value.streamKey = proxyResponse.data.key || ''
+            currentPlayback.value.note = 'ONVIF 设备端录像回放'
+          }
+        } else {
+          ElMessage.warning('无法获取 ONVIF 设备回放地址')
+        }
+      } catch (error) {
+        console.error('ONVIF 录像回放失败:', error)
+        ElMessage.warning('ONVIF 设备端录像回放功能开发中')
+      }
+    }
+  }
+  
   playbackDialogVisible.value = true
   playbackProgress.value = 0
-  // 简单估算时长（应该从后端获取）
-  playbackDuration.value = 3600 // 假设1小时
+  playbackDuration.value = 3600
 }
 
 const downloadRecording = async (recording: Recording) => {
   try {
-    const response = await axios.get(`http://localhost:9080/api/recording/${recording.recordingId}/download`, {
+    const response = await axios.get(`/api/recording/${recording.recordingId}/download`, {
       responseType: 'blob'
     })
     
@@ -634,7 +887,7 @@ const queryZLMRecordings = async () => {
       ? zlmQueryDate.value.toISOString().split('T')[0]
       : zlmQueryDate.value
 
-    const response = await axios.get('http://localhost:9080/api/recording/zlm/list', {
+    const response = await axios.get('/api/recording/zlm/list', {
       params: {
         channelId: zlmSelectedChannel.value,
         date: dateStr,
@@ -661,12 +914,79 @@ const clearZLMQuery = () => {
   zlmSelectedChannel.value = ''
   zlmQueryDate.value = new Date()
   zlmRecordings.value = []
+  zlmRecordingDates.value = []
+}
+
+// 获取通道有录像的日期列表
+const fetchRecordingDates = async (year?: number, month?: number) => {
+  if (!zlmSelectedChannel.value) {
+    zlmRecordingDates.value = []
+    return
+  }
+
+  try {
+    const y = year || zlmCalendarYear.value
+    const m = month || zlmCalendarMonth.value
+    
+    const response = await axios.get('/api/recording/zlm/dates', {
+      params: {
+        channelId: zlmSelectedChannel.value,
+        year: y,
+        month: m,
+        app: 'live'
+      }
+    })
+    
+    if (response.data.success) {
+      zlmRecordingDates.value = response.data.dates || []
+    }
+  } catch (error) {
+    console.error('获取录像日期失败:', error)
+  }
+}
+
+// 通道选择变化时获取录像日期
+const onZlmChannelChange = () => {
+  fetchRecordingDates()
+}
+
+// 日历面板切换时获取新月份的录像日期
+const onCalendarPanelChange = (date: Date) => {
+  zlmCalendarYear.value = date.getFullYear()
+  zlmCalendarMonth.value = date.getMonth() + 1
+  fetchRecordingDates()
+}
+
+// 获取日期单元格的样式类
+const getDateCellClass = (date: Date) => {
+  const dateStr = formatDateToString(date)
+  if (zlmRecordingDates.value.includes(dateStr)) {
+    return 'has-recording'
+  }
+  return ''
+}
+
+// 格式化日期为字符串 (YYYY-MM-DD)
+const formatDateToString = (date: Date): string => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+// 禁用没有录像的日期（可选功能，目前不启用）
+const disabledDate = (_date: Date) => {
+  // 返回 false 表示不禁用任何日期
+  // 如需禁用没有录像的日期，取消下面注释：
+  // const dateStr = formatDateToString(date)
+  // return !zlmRecordingDates.value.includes(dateStr)
+  return false
 }
 
 const playZLMRecording = async (recording: any) => {
   try {
     const response = await axios.get(
-      `http://localhost:9080/api/recording/zlm/play/${recording.app}/${recording.stream}/${recording.fileName}`
+      `/api/recording/zlm/play/${recording.app}/${recording.stream}/${recording.fileName}`
     )
     
     if (response.data.success) {
@@ -675,8 +995,13 @@ const playZLMRecording = async (recording: any) => {
         app: recording.app,
         stream: recording.stream,
         size: recording.fileSize,
+        fileSize: response.data.fileSize || recording.fileSize,
         modTime: recording.modTime,
         playUrl: response.data.playUrl || response.data.mp4Url,
+        flvUrl: response.data.flvUrl || '',
+        mp4Url: response.data.mp4Url || '',
+        downloadUrl: response.data.downloadUrl || response.data.mp4Url,
+        streamKey: response.data.streamKey || '',
         note: response.data.note || ''
       }
       selectedRecording.value = null
@@ -690,10 +1015,67 @@ const playZLMRecording = async (recording: any) => {
   }
 }
 
+// 关闭回放对话框时清理资源
+const onPlaybackDialogClose = async () => {
+  // 如果有 ZLM 流代理，停止它
+  if (currentPlayback.value.streamKey) {
+    try {
+      await axios.post('/api/recording/zlm/stop', null, {
+        params: { key: currentPlayback.value.streamKey }
+      })
+    } catch (error) {
+      console.warn('停止回放流失败:', error)
+    }
+  }
+  
+  // 如果有 GB28181 回放会话，停止它
+  if (currentPlayback.value.gb28181StreamId && selectedRecording.value) {
+    try {
+      await axios.post('/api/gb28181/record/playback/stop', {
+        channelId: selectedRecording.value.channelId,
+        streamId: currentPlayback.value.gb28181StreamId
+      })
+    } catch (error) {
+      console.warn('停止 GB28181 回放会话失败:', error)
+    }
+  }
+  
+  // 重置状态
+  currentPlayback.value = {
+    fileName: '',
+    app: '',
+    stream: '',
+    size: '',
+    fileSize: '',
+    modTime: '',
+    playUrl: '',
+    flvUrl: '',
+    mp4Url: '',
+    downloadUrl: '',
+    streamKey: '',
+    gb28181StreamId: '',
+    note: ''
+  }
+  selectedRecording.value = null
+}
+
+// 播放事件处理
+const onPlaybackPlaying = () => {
+  console.log('[Playback] 开始播放')
+}
+
+const onPlaybackEnded = () => {
+  console.log('[Playback] 播放结束')
+}
+
+const onPlaybackError = (error: any) => {
+  console.error('[Playback] 播放错误:', error)
+}
+
 const downloadZLMRecording = async (recording: any) => {
   try {
     const response = await axios.get(
-      `http://localhost:9080/api/recording/zlm/play/${recording.app}/${recording.stream}/${recording.fileName}`
+      `/api/recording/zlm/play/${recording.app}/${recording.stream}/${recording.fileName}`
     )
     
     if (response.data.success) {
@@ -731,7 +1113,7 @@ const copyToClipboard = async (text: string) => {
 // AI录像相关方法
 const fetchAIDetectorInfo = async () => {
   try {
-    const response = await axios.get('http://localhost:9080/api/ai/detector/info')
+    const response = await axios.get('/api/ai/detector/info')
     if (response.data.success) {
       aiDetectorInfo.value = response.data.info || { available: false }
     }
@@ -743,7 +1125,7 @@ const fetchAIDetectorInfo = async () => {
 
 const fetchAIConfig = async () => {
   try {
-    const response = await axios.get('http://localhost:9080/api/ai/config')
+    const response = await axios.get('/api/ai/config')
     if (response.data.success && response.data.config) {
       const cfg = response.data.config
       aiConfig.value = {
@@ -763,7 +1145,7 @@ const fetchAIConfig = async () => {
 const saveAIConfig = async () => {
   aiConfigLoading.value = true
   try {
-    const response = await axios.put('http://localhost:9080/api/ai/config', {
+    const response = await axios.put('/api/ai/config', {
       Enable: true,
       Confidence: aiConfig.value.confidence,
       IoUThreshold: aiConfig.value.iouThreshold,
@@ -787,7 +1169,7 @@ const saveAIConfig = async () => {
 
 const refreshAIStatus = async () => {
   try {
-    const response = await axios.get('http://localhost:9080/api/ai/recording/status/all')
+    const response = await axios.get('/api/ai/recording/status/all')
     if (response.data.success) {
       aiRecordingStatus.value = response.data.status || {}
       
@@ -823,7 +1205,7 @@ const startAIRecording = async () => {
 
   aiLoading.value = true
   try {
-    const response = await axios.post('http://localhost:9080/api/ai/recording/start', {
+    const response = await axios.post('/api/ai/recording/start', {
       channel_id: aiRecordingForm.value.channelId,
       mode: aiRecordingForm.value.mode
     })
@@ -845,7 +1227,7 @@ const startAIRecording = async () => {
 
 const stopAIRecording = async (channelId: string) => {
   try {
-    const response = await axios.post('http://localhost:9080/api/ai/recording/stop', {
+    const response = await axios.post('/api/ai/recording/stop', {
       channel_id: channelId
     })
     
@@ -994,5 +1376,42 @@ onUnmounted(() => {
 .stat-card .stat-desc {
   font-size: 12px;
   color: #909399;
+}
+</style>
+
+<!-- 全局样式用于日期选择器标记 -->
+<style>
+/* 有录像的日期标记样式 */
+.el-date-table td.has-recording {
+  position: relative;
+}
+
+.el-date-table td.has-recording .el-date-table-cell__text {
+  background-color: #409eff;
+  color: #fff;
+  border-radius: 50%;
+}
+
+.el-date-table td.has-recording::after {
+  content: '';
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  background-color: #67c23a;
+  border-radius: 50%;
+}
+
+/* 当前选中日期的有录像标记 */
+.el-date-table td.current.has-recording .el-date-table-cell__text {
+  background-color: #409eff;
+}
+
+/* 今天+有录像 */
+.el-date-table td.today.has-recording .el-date-table-cell__text {
+  background-color: #409eff;
+  color: #fff;
 }
 </style>

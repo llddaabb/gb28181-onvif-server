@@ -78,6 +78,47 @@ type DeviceInfoResponse struct {
 	Channel      int      `xml:"Channel"`
 }
 
+// RecordInfoResponse GB28181 录像查询响应结构
+type RecordInfoResponse struct {
+	XMLName    xml.Name       `xml:"Response"`
+	CmdType    string         `xml:"CmdType"`
+	SN         int            `xml:"SN"`
+	DeviceID   string         `xml:"DeviceID"`
+	Name       string         `xml:"Name"`
+	SumNum     int            `xml:"SumNum"`
+	RecordList RecordInfoList `xml:"RecordList"`
+}
+
+type RecordInfoList struct {
+	Num     int          `xml:"Num,attr"`
+	Records []RecordItem `xml:"Item"`
+}
+
+type RecordItem struct {
+	DeviceID   string `xml:"DeviceID"`
+	Name       string `xml:"Name"`
+	FilePath   string `xml:"FilePath"`
+	Address    string `xml:"Address"`
+	StartTime  string `xml:"StartTime"`
+	EndTime    string `xml:"EndTime"`
+	Secrecy    int    `xml:"Secrecy"`
+	Type       string `xml:"Type"`
+	RecorderID string `xml:"RecorderID"`
+	FileSize   int64  `xml:"FileSize"`
+}
+
+// DeviceRecordInfo 设备端录像信息（用于API返回）
+type DeviceRecordInfo struct {
+	DeviceID  string `json:"deviceId"`
+	ChannelID string `json:"channelId"`
+	Name      string `json:"name"`
+	FilePath  string `json:"filePath"`
+	StartTime string `json:"startTime"`
+	EndTime   string `json:"endTime"`
+	Type      string `json:"type"`
+	FileSize  int64  `json:"fileSize"`
+}
+
 // SIPMessage SIP消息结构体
 type SIPMessage struct {
 	Type       string            // 请求类型: REGISTER, INVITE, ACK, BYE, MESSAGE 等 (请求) / "" (响应)
@@ -654,6 +695,8 @@ func (s *Server) handleMessage(conn net.Conn, message *SIPMessage) {
 			s.parseCatalogResponse(deviceID, message.Body)
 		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
 			s.parseDeviceInfoResponse(deviceID, message.Body)
+		} else if strings.Contains(message.Body, "RecordInfo") && strings.Contains(message.Body, "Response") {
+			s.parseRecordInfoResponse(deviceID, message.Body)
 		} else {
 			// 其他消息类型
 			debug.Debug("gb28181", "TCP收到MESSAGE (设备 %s): %d字节", deviceID, len(message.Body))
@@ -839,9 +882,6 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 	}
 
 	if len(message.Body) > 0 {
-		// 记录收到的消息体内容（调试用）
-		log.Printf("[GB28181] MESSAGE内容: %s", message.Body[:min(len(message.Body), 200)])
-
 		if strings.Contains(message.Body, "Keepalive") {
 			// 心跳消息，更新状态
 			if deviceID != "" {
@@ -852,22 +892,16 @@ func (s *Server) handleMessageUDP(remoteAddr *net.UDPAddr, message *SIPMessage) 
 				hasChannels := exists && len(device.Channels) > 0
 				s.devicesMux.RUnlock()
 				if !hasChannels {
-					log.Printf("[GB28181] 设备 %s 无通道，利用心跳窗口发送目录查询", deviceID)
 					go s.QueryCatalog(deviceID)
 				}
 			}
 		} else if strings.Contains(message.Body, "Catalog") && strings.Contains(message.Body, "Response") {
-			log.Printf("[GB28181] 收到目录响应！")
 			s.parseCatalogResponse(deviceID, message.Body)
 		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
-			log.Printf("[GB28181] 收到设备信息响应！")
 			s.parseDeviceInfoResponse(deviceID, message.Body)
-		} else {
-			// 其他消息类型
-			log.Printf("[GB28181] 未知MESSAGE类型: %s", message.Body[:min(len(message.Body), 100)])
+		} else if strings.Contains(message.Body, "RecordInfo") && strings.Contains(message.Body, "Response") {
+			s.parseRecordInfoResponse(deviceID, message.Body)
 		}
-	} else {
-		log.Printf("[GB28181] MESSAGE无消息体")
 	}
 }
 
@@ -962,6 +996,58 @@ func (s *Server) parseDeviceInfoResponse(deviceID string, body string) {
 	debug.Debug("gb28181", "设备信息更新: ID=%s, 名称=%s, 厂商=%s", deviceID, info.DeviceName, info.Manufacturer)
 }
 
+// parseRecordInfoResponse 解析录像信息响应
+func (s *Server) parseRecordInfoResponse(deviceID string, body string) {
+	// 替换 GB2312 编码声明为 UTF-8，因为 Go 标准库不支持 GB2312
+	body = strings.Replace(body, `encoding="GB2312"`, `encoding="UTF-8"`, 1)
+	body = strings.Replace(body, `encoding='GB2312'`, `encoding='UTF-8'`, 1)
+
+	var recordInfo RecordInfoResponse
+	if err := xml.Unmarshal([]byte(body), &recordInfo); err != nil {
+		debug.Warn("gb28181", "解析录像信息响应失败: %v", err)
+		return
+	}
+
+	channelID := recordInfo.DeviceID
+	if channelID == "" {
+		channelID = deviceID
+	}
+
+	debug.Info("gb28181", "录像信息响应: 通道=%s, 总数=%d, 本次=%d",
+		channelID, recordInfo.SumNum, recordInfo.RecordList.Num)
+
+	// 转换为 DeviceRecordInfo 格式
+	var records []DeviceRecordInfo
+	for _, item := range recordInfo.RecordList.Records {
+		record := DeviceRecordInfo{
+			DeviceID:  deviceID,
+			ChannelID: channelID,
+			Name:      item.Name,
+			FilePath:  item.FilePath,
+			StartTime: item.StartTime,
+			EndTime:   item.EndTime,
+			Type:      item.Type,
+			FileSize:  item.FileSize,
+		}
+		records = append(records, record)
+	}
+
+	// 保存到缓存
+	s.recordMux.Lock()
+	// 如果是第一次返回（SN=1或之前没有缓存），清空旧数据
+	existingRecords, exists := s.recordCache[channelID]
+	if !exists {
+		s.recordCache[channelID] = records
+	} else {
+		// 追加新记录（GB28181 可能分多次返回）
+		s.recordCache[channelID] = append(existingRecords, records...)
+	}
+	s.recordMux.Unlock()
+
+	log.Printf("[GB28181] ✓ 收到 %d 条录像信息 (通道: %s, 总计: %d)",
+		len(records), channelID, recordInfo.SumNum)
+}
+
 // handleInviteUDP 处理 UDP INVITE 请求
 func (s *Server) handleInviteUDP(remoteAddr *net.UDPAddr, message *SIPMessage) {
 	fromHeader := message.Headers["From"]
@@ -1003,6 +1089,8 @@ func (s *Server) handleSIPResponseUDP(remoteAddr *net.UDPAddr, message *SIPMessa
 			s.parseCatalogResponse(deviceID, message.Body)
 		} else if strings.Contains(message.Body, "DeviceInfo") && strings.Contains(message.Body, "Response") {
 			s.parseDeviceInfoResponse(deviceID, message.Body)
+		} else if strings.Contains(message.Body, "RecordInfo") && strings.Contains(message.Body, "Response") {
+			s.parseRecordInfoResponse(deviceID, message.Body)
 		}
 	}
 }

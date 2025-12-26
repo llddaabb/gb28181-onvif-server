@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -344,57 +343,9 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	respondSuccessMsg(w, "配置已更新")
 }
 
-// getStaticDir 获取静态文件目录，优先使用配置，否则自动检测
-func (s *Server) getStaticDir() string {
-	// 优先使用配置中的路径
-	if s.config != nil && s.config.API != nil && s.config.API.StaticDir != "" {
-		staticDir := s.config.API.StaticDir
-		if info, err := os.Stat(staticDir); err == nil && info.IsDir() {
-			return staticDir
-		}
-	}
-
-	// 自动检测的目录列表
-	candidates := []string{
-		"www",           // 生产环境打包目录
-		"frontend/dist", // 开发环境目录
-		"./www",         // 当前目录下的 www
-		"./frontend/dist",
-	}
-
-	for _, dir := range candidates {
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			return dir
-		}
-	}
-
-	// 默认返回配置值或 www
-	if s.config != nil && s.config.API != nil && s.config.API.StaticDir != "" {
-		return s.config.API.StaticDir
-	}
-	return "www"
-}
-
-// handleServeStaticFile 提供静态文件
+// handleServeStaticFile 提供静态文件（支持嵌入式和本地文件系统）
 func (s *Server) handleServeStaticFile(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if path == "/" || path == "" {
-		path = "/index.html"
-	}
-
-	staticDir := s.getStaticDir()
-	filePath := staticDir + path
-
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		if !strings.HasPrefix(path, "/api") && !strings.HasPrefix(path, "/assets") {
-			http.ServeFile(w, r, staticDir+"/index.html")
-			return
-		}
-		http.NotFound(w, r)
-		return
-	}
-
-	http.ServeFile(w, r, filePath)
+	s.staticServer.ServeHTTP(w, r)
 }
 
 // 辅助函数：获取内存使用率

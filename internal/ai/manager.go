@@ -82,7 +82,7 @@ func (m *AIRecordingManager) GetDetectorInfo() map[string]interface{} {
 }
 
 // StartChannelRecording 启动通道AI录像
-func (m *AIRecordingManager) StartChannelRecording(channelID string, mode RecordingMode) error {
+func (m *AIRecordingManager) StartChannelRecording(channelID string, streamURL string, mode RecordingMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -91,8 +91,14 @@ func (m *AIRecordingManager) StartChannelRecording(channelID string, mode Record
 		return fmt.Errorf("通道 %s 的AI录像已启动", channelID)
 	}
 
+	// 验证 StreamURL
+	if streamURL == "" {
+		return fmt.Errorf("通道 %s 未提供流地址，无法启动AI检测", channelID)
+	}
+
 	// 创建录像器配置
 	config := DefaultRecorderConfig(channelID)
+	config.StreamURL = streamURL
 	config.Mode = mode
 
 	// 应用AI配置
@@ -100,6 +106,8 @@ func (m *AIRecordingManager) StartChannelRecording(channelID string, mode Record
 		config.DetectorConfig.Confidence = m.aiConfig.Confidence
 		config.DetectorConfig.IoUThreshold = m.aiConfig.IoUThreshold
 		config.DetectorConfig.NumThreads = m.aiConfig.NumThreads
+		config.DetectorConfig.ModelPath = m.aiConfig.ModelPath
+		config.DetectorConfig.InputSize = m.aiConfig.InputSize
 		if m.aiConfig.DetectInterval > 0 {
 			config.DetectInterval = time.Duration(m.aiConfig.DetectInterval) * time.Second
 		}
@@ -123,7 +131,8 @@ func (m *AIRecordingManager) StartChannelRecording(channelID string, mode Record
 	}
 
 	m.recorders[channelID] = recorder
-	debug.Info("ai", "通道AI录像已启动: channelID=%s, mode=%s", channelID, mode)
+	debug.Info("ai", "通道AI录像已启动: channelID=%s, streamURL=%s, mode=%s, detectInterval=%v, recordDelay=%v, minRecordTime=%v",
+		channelID, streamURL, mode, config.DetectInterval, config.RecordDelay, config.MinRecordTime)
 
 	return nil
 }

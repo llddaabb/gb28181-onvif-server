@@ -355,22 +355,32 @@ const addStream = async () => {
   }
 }
 
-// 预览流
-const previewStream = (row: Stream) => {
-  const host = window.location.hostname
-  const httpPort = 8080
-  const rtspPort = 8554
-  const rtmpPort = 1935
-  
+// 预览流 - 从后端API获取正确的播放地址
+const previewStream = async (row: Stream) => {
   const app = row.app || 'live'
   const stream = row.stream || row.ID || row.streamID || 'stream'
   
   previewInfo.stream = `${app}/${stream}`
   previewInfo.url = row.originUrl || row.URL || row.streamUrl || ''
-  previewInfo.httpFlv = `http://${host}:${httpPort}/${app}/${stream}.live.flv`
-  previewInfo.hls = `http://${host}:${httpPort}/${app}/${stream}/hls.m3u8`
-  previewInfo.rtsp = `rtsp://${host}:${rtspPort}/${app}/${stream}`
-  previewInfo.rtmp = `rtmp://${host}:${rtmpPort}/${app}/${stream}`
+  
+  // 从后端API获取流的播放地址（包含正确的端口配置）
+  try {
+    const response = await fetch(`/api/zlm/streams/${app}/${stream}/urls`)
+    if (response.ok) {
+      const data = await response.json()
+      // 使用后端返回的URL
+      previewInfo.httpFlv = data.flv_url || data.httpFlv || ''
+      previewInfo.hls = data.hls_url || data.hls || ''
+      previewInfo.rtsp = data.rtsp_url || data.rtsp || ''
+      previewInfo.rtmp = data.rtmp_url || data.rtmp || ''
+    } else {
+      ElMessage.error('获取流地址失败')
+      return
+    }
+  } catch (error) {
+    console.error('获取流地址失败:', error) 
+    
+  }
   
   showPreviewDialog.value = true
   // 打开对话框后使用 nextTick 启动播放并监听播放器事件
@@ -429,12 +439,13 @@ const copyUrl = (url: string) => {
   })
 }
 
-// 复制流地址
+// 复制流地址 - 使用已获取的正确地址
 const copyStreamUrl = (row: Stream) => {
-  const host = window.location.hostname
+  // 优先使用RTSP地址（最通用）
   const app = row.app || 'live'
   const stream = row.stream || row.ID || row.streamID || 'stream'
-  const url = `rtsp://${host}:8554/${app}/${stream}`
+  // 使用相对路径，让后端代理处理
+  const url = `http://${window.location.host}/zlm/${app}/${stream}.live.flv`
   copyUrl(url)
 }
 

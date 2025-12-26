@@ -154,14 +154,14 @@ func (d *EmbeddedDetector) preprocessImage(img image.Image) ([]float32, float32,
 	return tensor, scaleX, scaleY, nil
 }
 
-// simplePersonDetection 简化的人体检测（基于肤色和轮廓特征）
+// simplePersonDetection 简化的人体检测（基于多特征融合）
 // 注意：这是一个示例实现，实际应使用ONNX Runtime进行模型推理
 func (d *EmbeddedDetector) simplePersonDetection(tensor []float32, bounds image.Rectangle, scaleX, scaleY float32) []BBox {
 	var boxes []BBox
 
 	// 滑动窗口检测
 	windowSizes := []int{64, 128, 256}
-	stride := 32
+	stride := 48 // 增加步长以减少误检
 
 	for _, winSize := range windowSizes {
 		if winSize > d.inputWidth || winSize > d.inputHeight {
@@ -171,12 +171,22 @@ func (d *EmbeddedDetector) simplePersonDetection(tensor []float32, bounds image.
 		for y := 0; y <= d.inputHeight-winSize; y += stride {
 			for x := 0; x <= d.inputWidth-winSize; x += stride {
 				// 计算窗口内的特征
-				skinPixels, totalPixels := d.countSkinPixels(tensor, x, y, winSize)
+				skinPixels, totalPixels, avgBrightness := d.countSkinPixels(tensor, x, y, winSize)
 				skinRatio := float32(skinPixels) / float32(totalPixels)
 
-				// 如果肤色像素比例超过阈值，认为可能是人
-				if skinRatio > 0.1 && skinRatio < 0.6 {
-					confidence := d.calculateConfidence(skinRatio)
+				// 计算边缘强度
+				edgeStrength := d.calculateEdgeStrength(tensor, x, y, winSize)
+
+				// 多条件判断：
+				// 1. 肤色比例应在合理范围内（更严格）
+				// 2. 需要有明显的边缘特征（人体轮廓）
+				// 3. 亮度应在合理范围（避免过曝或过暗）
+				_ = float32(winSize) / float32(winSize) // aspectRatio - 当前是正方形窗口
+
+				if skinRatio > 0.15 && skinRatio < 0.45 &&
+					edgeStrength > 0.1 &&
+					avgBrightness > 0.1 && avgBrightness < 0.9 {
+					confidence := d.calculateConfidence(skinRatio, edgeStrength, avgBrightness)
 
 					if confidence >= d.config.Confidence {
 						// 转换回原图坐标
@@ -198,10 +208,11 @@ func (d *EmbeddedDetector) simplePersonDetection(tensor []float32, bounds image.
 	return boxes
 }
 
-// countSkinPixels 计算窗口内的肤色像素数量
-func (d *EmbeddedDetector) countSkinPixels(tensor []float32, startX, startY, size int) (int, int) {
+// countSkinPixels 计算窗口内的肤色像素数量和平均亮度
+func (d *EmbeddedDetector) countSkinPixels(tensor []float32, startX, startY, size int) (int, int, float32) {
 	skinCount := 0
 	total := 0
+	brightnessSum := float32(0)
 
 	for y := startY; y < startY+size && y < d.inputHeight; y++ {
 		for x := startX; x < startX+size && x < d.inputWidth; x++ {
@@ -209,6 +220,10 @@ func (d *EmbeddedDetector) countSkinPixels(tensor []float32, startX, startY, siz
 			r := tensor[idx]
 			g := tensor[d.inputHeight*d.inputWidth+idx]
 			b := tensor[2*d.inputHeight*d.inputWidth+idx]
+
+			// 计算亮度
+			brightness := 0.299*r + 0.587*g + 0.114*b
+			brightnessSum += brightness
 
 			// 简单的肤色检测（RGB空间）
 			if d.isSkinColor(r, g, b) {
@@ -218,7 +233,57 @@ func (d *EmbeddedDetector) countSkinPixels(tensor []float32, startX, startY, siz
 		}
 	}
 
-	return skinCount, total
+	avgBrightness := float32(0)
+	if total > 0 {
+		avgBrightness = brightnessSum / float32(total)
+	}
+
+	return skinCount, total, avgBrightness
+}
+
+// calculateEdgeStrength 计算边缘强度（简化的Sobel算子）
+func (d *EmbeddedDetector) calculateEdgeStrength(tensor []float32, startX, startY, size int) float32 {
+	edgeSum := float32(0)
+	count := 0
+
+	for y := startY + 1; y < startY+size-1 && y < d.inputHeight-1; y++ {
+		for x := startX + 1; x < startX+size-1 && x < d.inputWidth-1; x++ {
+			idx := y*d.inputWidth + x
+
+			// 计算灰度值（用于边缘检测）
+			r := tensor[idx]
+			g := tensor[d.inputHeight*d.inputWidth+idx]
+			b := tensor[2*d.inputHeight*d.inputWidth+idx]
+			_ = 0.299*r + 0.587*g + 0.114*b // gray - 灰度值
+
+			// Sobel X
+			gx := float32(0)
+			gx += tensor[(y-1)*d.inputWidth+(x-1)] * -1
+			gx += tensor[(y-1)*d.inputWidth+(x+1)] * 1
+			gx += tensor[y*d.inputWidth+(x-1)] * -2
+			gx += tensor[y*d.inputWidth+(x+1)] * 2
+			gx += tensor[(y+1)*d.inputWidth+(x-1)] * -1
+			gx += tensor[(y+1)*d.inputWidth+(x+1)] * 1
+
+			// Sobel Y
+			gy := float32(0)
+			gy += tensor[(y-1)*d.inputWidth+(x-1)] * -1
+			gy += tensor[(y-1)*d.inputWidth+x] * -2
+			gy += tensor[(y-1)*d.inputWidth+(x+1)] * -1
+			gy += tensor[(y+1)*d.inputWidth+(x-1)] * 1
+			gy += tensor[(y+1)*d.inputWidth+x] * 2
+			gy += tensor[(y+1)*d.inputWidth+(x+1)] * 1
+
+			magnitude := float32(math.Sqrt(float64(gx*gx + gy*gy)))
+			edgeSum += magnitude
+			count++
+		}
+	}
+
+	if count > 0 {
+		return edgeSum / float32(count)
+	}
+	return 0
 }
 
 // isSkinColor 判断是否为肤色
@@ -239,22 +304,31 @@ func (d *EmbeddedDetector) isSkinColor(r, g, b float32) bool {
 	return cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173
 }
 
-// calculateConfidence 根据特征计算置信度
-func (d *EmbeddedDetector) calculateConfidence(skinRatio float32) float32 {
-	// 肤色比例在0.2-0.4之间时置信度最高
-	optimal := float32(0.3)
-	diff := float32(math.Abs(float64(skinRatio - optimal)))
+// calculateConfidence 根据多个特征计算置信度
+func (d *EmbeddedDetector) calculateConfidence(skinRatio, edgeStrength, avgBrightness float32) float32 {
+	// 基础肤色权重
+	skinWeight := skinRatio * 0.5
 
-	// 线性衰减
-	confidence := 1.0 - diff*3
-	if confidence < 0 {
-		confidence = 0
-	}
-	if confidence > 1 {
-		confidence = 1
+	// 边缘强度权重（人形通常有明显的轮廓）
+	edgeWeight := float32(0)
+	if edgeStrength > 0.2 {
+		edgeWeight = 0.3
 	}
 
-	return confidence * 0.8 // 最高0.8的置信度（因为是简化算法）
+	// 亮度权重（避免过暗或过亮的区域）
+	brightnessWeight := float32(0)
+	if avgBrightness > 0.2 && avgBrightness < 0.8 {
+		brightnessWeight = 0.2
+	}
+
+	confidence := skinWeight + edgeWeight + brightnessWeight
+
+	// 归一化到0-1，但最高只到0.8（因为是简化算法）
+	if confidence > 0.8 {
+		confidence = 0.8
+	}
+
+	return confidence
 }
 
 // nonMaxSuppression 非极大值抑制

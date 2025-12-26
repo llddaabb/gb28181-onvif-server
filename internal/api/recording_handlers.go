@@ -240,35 +240,77 @@ func (s *Server) handlePlayZLMRecording(w http.ResponseWriter, r *http.Request) 
 
 	// 获取 ZLM HTTP 端口
 	zlmHost := "127.0.0.1"
-	zlmHTTPPort := 8080
-	if s.config.ZLM != nil {
-		zlmHTTPPort = s.config.ZLM.GetHTTPPort()
-	}
+	zlmHTTPPort, _, _ := s.getZLMPorts()
 
 	// 构造多种播放 URL
 	// 1. HTTP直接访问MP4文件（可能浏览器不支持某些编码）
 	mp4URL := fmt.Sprintf("http://%s:%d/%s", zlmHost, zlmHTTPPort, strings.ReplaceAll(relPath, "\\", "/"))
 
-	// 2. HTTP-FLV流（需要通过addStreamProxy创建）
-	// 生成唯一的回放流ID
+	// 2. 生成唯一的回放流ID
 	playbackStreamID := fmt.Sprintf("playback_%s_%d", stream, time.Now().Unix())
 
-	// 使用ZLM API创建流代理（将MP4文件作为输入源）
-	flvURL := fmt.Sprintf("http://%s:%d/%s/%s.live.flv", zlmHost, zlmHTTPPort, app, playbackStreamID)
+	// 3. 尝试通过 ZLM API 创建流代理（将 MP4 文件转为 FLV 流）
+	var flvURL string
+	var wsFlvURL string
+	var streamKey string
+	var proxyCreated bool
 
-	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":        true,
-		"mp4Url":         mp4URL,
-		"flvUrl":         flvURL,
-		"playUrl":        mp4URL, // 默认返回MP4直接访问
-		"playbackStream": playbackStreamID,
-		"filePath":       filePath,
-		"relativePath":   relPath,
-		"app":            app,
-		"stream":         stream,
-		"fileName":       fileName,
-		"note":           "如浏览器无法播放MP4，请使用VLC等播放器",
-	})
+	if s.zlmServer != nil && s.zlmServer.GetAPIClient() != nil {
+		apiClient := s.zlmServer.GetAPIClient()
+		// 使用 file:// 协议让 ZLM 读取本地 MP4 文件
+		fileSourceURL := "file://" + filePath
+
+		// 添加流代理选项
+		opts := map[string]interface{}{
+			"enable_mp4":   false,
+			"enable_hls":   false,
+			"enable_rtsp":  false,
+			"enable_rtmp":  false,
+			"timeout_sec":  300, // 5分钟超时
+			"retry_count":  0,   // 不重试（文件播放完即结束）
+			"enable_audio": true,
+		}
+
+		proxyInfo, err := apiClient.AddStreamProxyWithOptions(fileSourceURL, "playback", playbackStreamID, opts)
+		if err == nil && proxyInfo != nil {
+			streamKey = proxyInfo.Key
+			flvURL = fmt.Sprintf("http://%s:%d/playback/%s.live.flv", zlmHost, zlmHTTPPort, playbackStreamID)
+			wsFlvURL = fmt.Sprintf("ws://%s:%d/playback/%s.live.flv", zlmHost, zlmHTTPPort, playbackStreamID)
+			proxyCreated = true
+		}
+	}
+
+	// 获取文件信息
+	fileInfo, _ := os.Stat(filePath)
+	var fileSize string
+	if fileInfo != nil {
+		fileSize = formatFileSize(fileInfo.Size())
+	}
+
+	response := map[string]interface{}{
+		"success":      true,
+		"mp4Url":       mp4URL,
+		"playUrl":      mp4URL, // 默认返回MP4
+		"downloadUrl":  mp4URL,
+		"filePath":     filePath,
+		"relativePath": relPath,
+		"app":          app,
+		"stream":       stream,
+		"fileName":     fileName,
+		"fileSize":     fileSize,
+	}
+
+	if proxyCreated {
+		response["flvUrl"] = flvURL
+		response["wsFlvUrl"] = wsFlvURL
+		response["streamKey"] = streamKey
+		response["playUrl"] = flvURL // 优先使用 FLV 流
+		response["note"] = "使用 FLV 流播放，支持 H.264/H.265"
+	} else {
+		response["note"] = "直接播放 MP4 文件，如浏览器不支持请下载后使用播放器"
+	}
+
+	s.jsonResponse(w, http.StatusOK, response)
 }
 
 // findRecordingFile 在通道目录下递归查找录像文件
@@ -316,4 +358,160 @@ func formatFileSize(size int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+// handleGetRecordingDates 获取通道有录像的日期列表
+// 用于日历标记功能，返回指定年月内有录像的日期
+func (s *Server) handleGetRecordingDates(w http.ResponseWriter, r *http.Request) {
+	if s.zlmProcess == nil {
+		s.jsonError(w, http.StatusInternalServerError, "ZLM进程未初始化")
+		return
+	}
+
+	// 获取查询参数
+	channelId := r.URL.Query().Get("channelId")
+	yearStr := r.URL.Query().Get("year")
+	monthStr := r.URL.Query().Get("month")
+	app := r.URL.Query().Get("app")
+
+	if channelId == "" {
+		s.jsonError(w, http.StatusBadRequest, "缺少channelId参数")
+		return
+	}
+
+	if app == "" {
+		app = "live"
+	}
+
+	// 解析年月，默认为当前月
+	now := time.Now()
+	year := now.Year()
+	month := int(now.Month())
+
+	if yearStr != "" {
+		if y, err := time.Parse("2006", yearStr); err == nil {
+			year = y.Year()
+		}
+	}
+	if monthStr != "" {
+		if m, err := time.Parse("01", monthStr); err == nil {
+			month = int(m.Month())
+		} else if m, err := time.Parse("1", monthStr); err == nil {
+			month = int(m.Month())
+		}
+	}
+
+	// 获取ZLM实际工作目录
+	workDir := s.zlmProcess.GetWorkDir()
+	recordPath := filepath.Join(workDir, "www", "record")
+
+	// 构造通道录像目录路径
+	channelRecordPath := filepath.Join(recordPath, app, channelId)
+
+	// 存储有录像的日期
+	var recordingDates []string
+	dateSet := make(map[string]bool)
+
+	// 检查通道录像目录是否存在
+	if _, err := os.Stat(channelRecordPath); os.IsNotExist(err) {
+		s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"success":   true,
+			"channelId": channelId,
+			"year":      year,
+			"month":     month,
+			"dates":     []string{},
+			"count":     0,
+		})
+		return
+	}
+
+	// 扫描日期目录
+	entries, err := os.ReadDir(channelRecordPath)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, "读取录像目录失败")
+		return
+	}
+
+	// 目标年月前缀
+	targetPrefix := fmt.Sprintf("%d-%02d", year, month)
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		dateName := entry.Name() // 格式: 2025-12-23
+
+		// 检查是否是目标年月
+		if !strings.HasPrefix(dateName, targetPrefix) {
+			continue
+		}
+
+		// 检查目录内是否有录像文件
+		datePath := filepath.Join(channelRecordPath, dateName)
+		hasRecordings := checkDirectoryHasRecordings(datePath)
+
+		if hasRecordings && !dateSet[dateName] {
+			dateSet[dateName] = true
+			recordingDates = append(recordingDates, dateName)
+		}
+	}
+
+	// 排序日期
+	sort.Strings(recordingDates)
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"channelId": channelId,
+		"year":      year,
+		"month":     month,
+		"dates":     recordingDates,
+		"count":     len(recordingDates),
+	})
+}
+
+// checkDirectoryHasRecordings 检查目录内是否有录像文件
+func checkDirectoryHasRecordings(dirPath string) bool {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fileName := entry.Name()
+		// 检查是否为 mp4 文件（包括正在录制的）
+		if strings.HasSuffix(strings.ToLower(fileName), ".mp4") {
+			return true
+		}
+	}
+	return false
+}
+
+// handleStopPlayback 停止录像回放（释放流代理资源）
+func (s *Server) handleStopPlayback(w http.ResponseWriter, r *http.Request) {
+	streamKey := r.URL.Query().Get("key")
+	if streamKey == "" {
+		s.jsonError(w, http.StatusBadRequest, "缺少 key 参数")
+		return
+	}
+
+	if s.zlmServer == nil || s.zlmServer.GetAPIClient() == nil {
+		s.jsonError(w, http.StatusInternalServerError, "ZLM服务不可用")
+		return
+	}
+
+	apiClient := s.zlmServer.GetAPIClient()
+	err := apiClient.DelStreamProxy(streamKey)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, fmt.Sprintf("停止回放失败: %v", err))
+		return
+	}
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "回放已停止",
+	})
 }

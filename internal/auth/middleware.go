@@ -49,6 +49,7 @@ func NewMiddleware(am *AuthManager) *Middleware {
 			"/api/recording/",
 			"/api/storage/",
 			"/api/ai/",
+			"/api/zlm/", // ZLM 媒体服务器相关 API
 			"/assets/",
 			"/jessibuca/",
 			"/favicon.ico",

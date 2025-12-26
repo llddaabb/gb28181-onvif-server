@@ -174,9 +174,10 @@ func (r *StreamRecorder) performDetection() {
 	// 获取当前帧（需要从流中抓取）
 	frame, err := r.captureFrame()
 	if err != nil {
-		debug.Error("ai", "捕获帧失败: %v", err)
+		debug.Error("ai", "[%s] 捕获帧失败 (streamURL=%s): %v", r.channelID, r.streamURL, err)
 		return
 	}
+	debug.Info("ai", "[%s] 成功捕获帧: %dx%d", r.channelID, frame.Bounds().Max.X, frame.Bounds().Max.Y)
 
 	// 获取检测器
 	detectCtx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
@@ -193,7 +194,7 @@ func (r *StreamRecorder) performDetection() {
 	// 执行检测
 	result, err := detector.Detect(detectCtx, frame)
 	if err != nil {
-		debug.Error("ai", "检测失败: %v", err)
+		debug.Error("ai", "[%s] 检测失败: %v", r.channelID, err)
 		return
 	}
 
@@ -207,8 +208,10 @@ func (r *StreamRecorder) performDetection() {
 		r.stats.LastPersonTime = time.Now()
 		r.lastPersonTime = time.Now()
 
-		debug.Info("ai", "检测到 %d 个人: channelID=%s, confidence=%.2f",
-			result.PersonCount, r.channelID, result.Confidence)
+		debug.Info("ai", "[%s] 检测到 %d 个人: confidence=%.2f, shouldRecord=%v",
+			r.channelID, result.PersonCount, result.Confidence, r.shouldRecord(result))
+	} else {
+		debug.Info("ai", "[%s] 检测完成: 无人形检测 (总检测次数=%d)", r.channelID, r.stats.TotalDetections)
 	}
 
 	// 判断是否需要录像
@@ -271,11 +274,18 @@ func (r *StreamRecorder) startRecording() {
 	defer r.mu.Unlock()
 
 	if r.isRecording {
+		debug.Info("ai", "[%s] 录像已启动中，跳过重复启动", r.channelID)
 		return
 	}
 
+	if r.recordControl == nil {
+		debug.Error("ai", "[%s] recordControl回调为nil，无法启动录像", r.channelID)
+		return
+	}
+
+	debug.Info("ai", "[%s] 正在调用recordControl(channelID=%s, start=true)...", r.channelID, r.channelID)
 	if err := r.recordControl(r.channelID, true); err != nil {
-		debug.Error("ai", "启动录像失败: %v", err)
+		debug.Error("ai", "[%s] 启动录像失败: %v", r.channelID, err)
 		return
 	}
 
@@ -283,7 +293,7 @@ func (r *StreamRecorder) startRecording() {
 	r.recordStartTime = time.Now()
 	r.stats.RecordingSessions++
 
-	debug.Info("ai", "AI录像已启动: channelID=%s", r.channelID)
+	debug.Info("ai", "[%s] ✓ AI录像已启动", r.channelID)
 }
 
 // stopRecording 停止录像
@@ -292,11 +302,18 @@ func (r *StreamRecorder) stopRecording() {
 	defer r.mu.Unlock()
 
 	if !r.isRecording {
+		debug.Info("ai", "[%s] 录像未启动，无需停止", r.channelID)
 		return
 	}
 
+	if r.recordControl == nil {
+		debug.Error("ai", "[%s] recordControl回调为nil，无法停止录像", r.channelID)
+		return
+	}
+
+	debug.Info("ai", "[%s] 正在调用recordControl(channelID=%s, start=false)...", r.channelID, r.channelID)
 	if err := r.recordControl(r.channelID, false); err != nil {
-		debug.Error("ai", "停止录像失败: %v", err)
+		debug.Error("ai", "[%s] 停止录像失败: %v", r.channelID, err)
 		return
 	}
 
@@ -304,7 +321,7 @@ func (r *StreamRecorder) stopRecording() {
 	r.stats.TotalRecordTime += recordDuration
 	r.isRecording = false
 
-	debug.Info("ai", "AI录像已停止: channelID=%s, duration=%v", r.channelID, recordDuration)
+	debug.Info("ai", "[%s] ✓ AI录像已停止，时长=%v", r.channelID, recordDuration)
 }
 
 // captureFrame 捕获当前帧（从流中抓取）

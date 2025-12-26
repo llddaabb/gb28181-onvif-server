@@ -71,12 +71,18 @@ func createONNXDetector(cfg DetectorFactoryConfig) (Detector, error) {
 		}
 	}
 
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		debug.Warn("ai", "模型文件不存在: %s，回退到嵌入式检测器", modelPath)
-		return createEmbeddedDetector(cfg)
+	fileInfo, err := os.Stat(modelPath)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("模型文件不存在: %s", modelPath)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("无法访问模型文件 %s: %w", modelPath, err)
+	}
+	if fileInfo.Size() == 0 {
+		return nil, fmt.Errorf("模型文件为空: %s", modelPath)
 	}
 
-	debug.Info("ai", "创建 ONNX Runtime 检测器: model=%s", modelPath)
+	debug.Info("ai", "创建 ONNX Runtime 检测器: model=%s (size=%d bytes)", modelPath, fileInfo.Size())
 	cfg.Config.ModelPath = modelPath
 	return NewONNXRuntimeDetector(cfg.Config)
 }
@@ -105,14 +111,17 @@ func createAutoDetector(cfg DetectorFactoryConfig) (Detector, error) {
 			}
 		}
 
-		if _, err := os.Stat(absPath); err == nil {
-			debug.Info("ai", "找到模型文件: %s", absPath)
+		fileInfo, err := os.Stat(absPath)
+		if err == nil && fileInfo.Size() > 0 {
+			debug.Info("ai", "找到有效的模型文件: %s (size=%d bytes)", absPath, fileInfo.Size())
 			cfg.Config.ModelPath = absPath
 			detector, err := NewONNXRuntimeDetector(cfg.Config)
 			if err == nil {
 				return detector, nil
 			}
 			debug.Warn("ai", "创建 ONNX 检测器失败: %v", err)
+		} else if err == nil {
+			debug.Warn("ai", "跳过空的模型文件: %s", absPath)
 		}
 	}
 
@@ -126,9 +135,8 @@ func createAutoDetector(cfg DetectorFactoryConfig) (Detector, error) {
 		debug.Warn("ai", "创建 HTTP 检测器失败: %v", err)
 	}
 
-	// 3. 回退到嵌入式检测器
-	debug.Info("ai", "回退到嵌入式检测器")
-	return NewEmbeddedDetector(cfg.Config)
+	// 3. 没有可用的检测器
+	return nil, fmt.Errorf("没有找到可用的检测器：ONNX 模型不存在且未配置 HTTP API 端点")
 }
 
 // DetectorInfo 检测器信息
@@ -162,9 +170,6 @@ func GetDetectorInfo(detector Detector) DetectorInfo {
 	case "ONNX-YOLOv8":
 		detectorInfo.Type = DetectorTypeONNX
 		detectorInfo.Features = []string{"offline", "full-model", "hardware-acceleration"}
-	case "Fallback-Detector":
-		detectorInfo.Type = DetectorTypeEmbedded
-		detectorInfo.Features = []string{"fallback", "basic-detection"}
 	default:
 		detectorInfo.Type = DetectorTypeAuto
 	}
@@ -183,15 +188,6 @@ func ListAvailableDetectors() []DetectorInfo {
 		Backend:  "remote",
 		Status:   "available",
 		Features: []string{"remote", "scalable", "full-model"},
-	})
-
-	// 嵌入式检测器总是可用
-	detectors = append(detectors, DetectorInfo{
-		Type:     DetectorTypeEmbedded,
-		Name:     "嵌入式检测器",
-		Backend:  "go-native",
-		Status:   "available",
-		Features: []string{"offline", "no-dependency", "lightweight"},
 	})
 
 	// 检查 ONNX 模型是否存在

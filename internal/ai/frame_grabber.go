@@ -74,14 +74,18 @@ func (g *FrameGrabber) CaptureFrameScaled(ctx context.Context, width, height int
 
 	scaleFilter := fmt.Sprintf("scale=%d:%d", width, height)
 
-	cmd := exec.CommandContext(ctx, g.ffmpegBin,
+	// 构建ffmpeg命令，添加更多选项以提高兼容性
+	args := []string{
+		"-rtsp_transport", "tcp", // 使用TCP传输（对RTSP更稳定）
 		"-i", g.streamURL,
 		"-vframes", "1",
 		"-vf", scaleFilter,
 		"-f", "image2pipe",
 		"-vcodec", "mjpeg",
 		"-",
-	)
+	}
+
+	cmd := exec.CommandContext(ctx, g.ffmpegBin, args...)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -89,7 +93,9 @@ func (g *FrameGrabber) CaptureFrameScaled(ctx context.Context, width, height int
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		debug.Error("ai", "ffmpeg错误: %s", stderr.String())
+		// 记录更详细的错误信息，包括streamURL
+		stderrStr := stderr.String()
+		debug.Error("ai", "ffmpeg捕获帧失败 (streamURL=%s): %v\nstderr: %s", g.streamURL, err, stderrStr)
 		return nil, fmt.Errorf("捕获帧失败: %w", err)
 	}
 

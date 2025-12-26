@@ -2145,3 +2145,119 @@ func (s *WSDiscoveryService) parseProbeResponseFallback(data []byte) *DeviceDisc
 
 	return result
 }
+
+// ============================================================================
+// 录像查询功能
+// ============================================================================
+
+// ONVIFRecordInfo ONVIF 录像信息（用于API返回）
+type ONVIFRecordInfo struct {
+	DeviceID       string    `json:"deviceId"`
+	RecordingToken string    `json:"recordingToken"`
+	Name           string    `json:"name"`
+	Source         string    `json:"source"`
+	Content        string    `json:"content"`
+	StartTime      time.Time `json:"startTime"`
+	EndTime        time.Time `json:"endTime"`
+}
+
+// QueryRecordings 查询设备录像列表
+func (m *Manager) QueryRecordings(deviceID string) ([]ONVIFRecordInfo, error) {
+	m.devicesMux.RLock()
+	device, exists := m.devices[deviceID]
+	m.devicesMux.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("设备 %s 不存在", deviceID)
+	}
+
+	client, err := m.getOrCreateSOAPClient(device)
+	if err != nil {
+		return nil, fmt.Errorf("获取SOAP客户端失败: %w", err)
+	}
+
+	recordings, err := client.GetRecordings()
+	if err != nil {
+		return nil, fmt.Errorf("查询录像失败: %w", err)
+	}
+
+	var result []ONVIFRecordInfo
+	for _, rec := range recordings {
+		result = append(result, ONVIFRecordInfo{
+			DeviceID:       deviceID,
+			RecordingToken: rec.RecordingToken,
+			Name:           rec.Name,
+			Source:         rec.Source,
+			Content:        rec.Content,
+			StartTime:      rec.StartTime,
+			EndTime:        rec.EndTime,
+		})
+	}
+
+	return result, nil
+}
+
+// QueryRecordingsByTime 按时间范围查询设备录像
+func (m *Manager) QueryRecordingsByTime(deviceID string, startTime, endTime time.Time) ([]ONVIFRecordInfo, error) {
+	m.devicesMux.RLock()
+	device, exists := m.devices[deviceID]
+	m.devicesMux.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("设备 %s 不存在", deviceID)
+	}
+
+	client, err := m.getOrCreateSOAPClient(device)
+	if err != nil {
+		return nil, fmt.Errorf("获取SOAP客户端失败: %w", err)
+	}
+
+	recordings, err := client.FindRecordingsByTime(startTime, endTime)
+	if err != nil {
+		return nil, fmt.Errorf("查询录像失败: %w", err)
+	}
+
+	var result []ONVIFRecordInfo
+	for _, rec := range recordings {
+		result = append(result, ONVIFRecordInfo{
+			DeviceID:       deviceID,
+			RecordingToken: rec.RecordingToken,
+			Name:           rec.Name,
+			Source:         rec.Source,
+			Content:        rec.Content,
+			StartTime:      rec.StartTime,
+			EndTime:        rec.EndTime,
+		})
+	}
+
+	return result, nil
+}
+
+// GetRecordingReplayUri 获取录像回放地址
+func (m *Manager) GetRecordingReplayUri(deviceID, recordingToken string) (string, error) {
+	m.devicesMux.RLock()
+	device, exists := m.devices[deviceID]
+	m.devicesMux.RUnlock()
+	if !exists {
+		return "", fmt.Errorf("设备 %s 不存在", deviceID)
+	}
+
+	client, err := m.getOrCreateSOAPClient(device)
+	if err != nil {
+		return "", fmt.Errorf("获取SOAP客户端失败: %w", err)
+	}
+
+	uri, err := client.GetReplayUri(recordingToken, "RTP-Unicast")
+	if err != nil {
+		return "", fmt.Errorf("获取回放地址失败: %w", err)
+	}
+
+	// 如果设备有用户名密码，尝试嵌入到 RTSP URL 中
+	if device.Username != "" && device.Password != "" {
+		// 将认证信息嵌入 RTSP URL
+		if strings.HasPrefix(uri, "rtsp://") {
+			uri = strings.Replace(uri, "rtsp://",
+				fmt.Sprintf("rtsp://%s:%s@", device.Username, device.Password), 1)
+		}
+	}
+
+	return uri, nil
+}

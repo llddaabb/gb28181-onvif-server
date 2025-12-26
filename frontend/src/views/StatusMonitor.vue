@@ -277,19 +277,19 @@ const getLogTagType = (level: string) => {
 const fetchStatus = async () => {
   try {
     // 获取服务器状态
-    const statusResponse = await axios.get('http://localhost:9080/api/status')
+    const statusResponse = await axios.get('/api/status')
     if (statusResponse.data.serverInfo) {
       serverInfo.value = statusResponse.data.serverInfo
     }
 
     // 获取设备统计
-    const statsResponse = await axios.get('http://localhost:9080/api/stats')
+    const statsResponse = await axios.get('/api/stats')
     if (statsResponse.data.success && statsResponse.data.stats) {
       deviceStats.value = statsResponse.data.stats
     }
 
     // 获取系统资源
-    const resourcesResponse = await axios.get('http://localhost:9080/api/resources')
+    const resourcesResponse = await axios.get('/api/resources')
     if (resourcesResponse.data.success && resourcesResponse.data.resources) {
       // 确保返回的 resources 包含 diskUsage 和 network
       const res = resourcesResponse.data.resources
@@ -300,7 +300,7 @@ const fetchStatus = async () => {
     }
 
     // 获取最新日志
-    const logsResponse = await axios.get('http://localhost:9080/api/logs/latest')
+    const logsResponse = await axios.get('/api/logs/latest')
     if (logsResponse.data.success && logsResponse.data.logs) {
       logs.value = [...logsResponse.data.logs, ...logs.value].slice(0, 50)
     }

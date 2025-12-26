@@ -538,18 +538,8 @@ const addStreamToNextSlot = async (data: TreeNode) => {
     slot.ptzDeviceId = deviceId
     slot.ptzChannelId = channelId
     
-    // 先检查流是否已存在（直接尝试播放地址）
-    const liveStreamUrl = streamId ? `http://${host}:8080/${appName}/${streamId}.live.flv` : `http://${host}:8080/live/${channelId}.live.flv`
-    const rtpStreamUrl = streamId ? `http://${host}:8080/rtp/${streamId}.live.flv` : `http://${host}:8080/rtp/${channelId}.live.flv`
+    // 直接调用API启动预览，使用API返回的URL（而不是自己拼接）
     let streamReady = false
-    if (streamId) {
-      const online = await isStreamOnline(appName, streamId)
-      if (online) {
-        slot.streamUrl = liveStreamUrl
-        streamReady = true
-        console.log('流已存在，直接播放:', liveStreamUrl)
-      }
-    }
     
     if (!streamReady) {
       try {
@@ -561,13 +551,10 @@ const addStreamToNextSlot = async (data: TreeNode) => {
         if (result.success && result.data) {
           slot.flvUrl = result.data.flv_url ? result.data.flv_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
           slot.hlsUrl = result.data.hls_url ? result.data.hls_url.replace('127.0.0.1', host).replace('localhost', host) : undefined
-          slot.streamUrl = slot.hlsUrl || slot.flvUrl || liveStreamUrl
+          slot.streamUrl = slot.hlsUrl || slot.flvUrl
           streamReady = true
           console.log('API 返回的 URLs:', { flv: slot.flvUrl, hls: slot.hlsUrl }, '选用:', slot.streamUrl)
           await new Promise(resolve => setTimeout(resolve, 1000))
-        } else if (result.error && result.error.includes('already exists')) {
-          slot.streamUrl = liveStreamUrl
-          streamReady = true
         }
       } catch (error) {
         console.error('测试预览请求失败:', error)

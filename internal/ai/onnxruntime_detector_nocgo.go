@@ -5,6 +5,7 @@ package ai
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"math"
 	"sort"
@@ -27,23 +28,10 @@ type ONNXRuntimeDetector struct {
 
 // NewONNXRuntimeDetector 创建检测器
 func NewONNXRuntimeDetector(config DetectorConfig) (*ONNXRuntimeDetector, error) {
-	detector := &ONNXRuntimeDetector{
-		config: config,
-		modelInfo: ModelInfo{
-			Name:         "Fallback-Detector",
-			Backend:      "go-native",
-			InputSize:    config.InputSize,
-			Confidence:   config.Confidence,
-			IoUThreshold: config.IoUThreshold,
-		},
-		inputWidth:  config.InputSize,
-		inputHeight: config.InputSize,
-	}
-
-	debug.Warn("ai", "CGO 未启用，使用纯 Go 备用检测器（功能受限）")
-	debug.Info("ai", "如需完整 ONNX 推理，请使用 CGO_ENABLED=1 编译")
-
-	return detector, nil
+	debug.Error("ai", "CGO 未启用，无法使用 ONNX Runtime 检测器")
+	debug.Info("ai", "如需 ONNX 推理，请使用 CGO_ENABLED=1 编译")
+	debug.Info("ai", "或使用外部 Python YOLO v8 检测器（通过 HTTP API）")
+	return nil, fmt.Errorf("ONNX Runtime 检测器需要 CGO 支持，请使用 CGO_ENABLED=1 编译或使用外部 HTTP 检测器")
 }
 
 // Detect 检测图像

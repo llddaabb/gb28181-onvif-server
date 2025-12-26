@@ -240,7 +240,7 @@ const currentDisk = ref<Disk>({
 
 const fetchDisks = async () => {
   try {
-    const response = await axios.get('http://localhost:9080/api/storage/disks')
+    const response = await axios.get('/api/storage/disks')
     if (response.data.success) {
       disks.value = response.data.disks || []
       stats.value = response.data.stats || {}
@@ -253,7 +253,7 @@ const fetchDisks = async () => {
 
 const fetchRecyclePolicy = async () => {
   try {
-    const response = await axios.get('http://localhost:9080/api/storage/recycle-policy')
+    const response = await axios.get('/api/storage/recycle-policy')
     if (response.data.success && response.data.policy) {
       recyclePolicy.value = response.data.policy
     }
@@ -291,12 +291,12 @@ const saveDisk = async () => {
   try {
     if (isEdit.value) {
       await axios.put(
-        `http://localhost:9080/api/storage/disks/${currentDisk.value.id}`,
+        `/api/storage/disks/${currentDisk.value.id}`,
         currentDisk.value
       )
       ElMessage.success('磁盘更新成功')
     } else {
-      await axios.post('http://localhost:9080/api/storage/disks', currentDisk.value)
+      await axios.post('/api/storage/disks', currentDisk.value)
       ElMessage.success('磁盘添加成功')
     }
     diskDialogVisible.value = false
@@ -308,7 +308,7 @@ const saveDisk = async () => {
 
 const updateDisk = async (disk: Disk) => {
   try {
-    await axios.put(`http://localhost:9080/api/storage/disks/${disk.id}`, disk)
+    await axios.put(`/api/storage/disks/${disk.id}`, disk)
     ElMessage.success('磁盘状态更新成功')
     fetchDisks()
   } catch (error: any) {
@@ -328,7 +328,7 @@ const removeDisk = async (disk: Disk) => {
       }
     )
 
-    await axios.delete(`http://localhost:9080/api/storage/disks/${disk.id}`)
+    await axios.delete(`/api/storage/disks/${disk.id}`)
     ElMessage.success('磁盘移除成功')
     fetchDisks()
   } catch (error: any) {
@@ -340,7 +340,7 @@ const removeDisk = async (disk: Disk) => {
 
 const saveRecyclePolicy = async () => {
   try {
-    await axios.put('http://localhost:9080/api/storage/recycle-policy', recyclePolicy.value)
+    await axios.put('/api/storage/recycle-policy', recyclePolicy.value)
     ElMessage.success('循环录制策略保存成功')
   } catch (error: any) {
     ElMessage.error(error.response?.data?.error || '保存失败')

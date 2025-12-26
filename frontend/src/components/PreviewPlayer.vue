@@ -826,15 +826,9 @@ const stopPreview = async () => {
             body: JSON.stringify({ channelId: deviceId }) 
           }).then(r => r.json().catch(() => ({}))).catch(() => {})
         }
-      } else {
-        // 回退到通用 stop，根据设备类型选择API路径
-        const baseApi = props.deviceType === 'onvif' ? '/api/onvif' : '/api/gb28181'
-        await fetch(`${baseApi}/stop`, { 
-          method: 'POST', 
-          headers: { 'Content-Type': 'application/json' }, 
-          body: JSON.stringify(streamInfoRaw.value) 
-        }).then(r => r.json().catch(() => ({}))).catch(() => {})
       }
+      // 注意：移除了错误的回退到 /api/gb28181/stop 的逻辑
+      // 该接口是停止整个GB28181服务，不应该在停止预览时调用
     } catch (e) {
       console.warn('stopPreview backend failed', e)
     }

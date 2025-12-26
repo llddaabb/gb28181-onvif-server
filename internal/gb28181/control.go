@@ -177,11 +177,8 @@ type CatalogQuery struct {
 func (s *Server) SendCatalogQuery(deviceID string) error {
 	device, exists := s.GetDeviceByID(deviceID)
 	if !exists {
-		log.Printf("[Catalog] [ERROR] 设备不存在: %s", deviceID)
 		return fmt.Errorf("设备不存在: %s", deviceID)
 	}
-
-	log.Printf("[Catalog] 发送目录查询到设备 %s [%s]", deviceID, device.Transport)
 
 	// 生成目录查询 XML
 	query := &CatalogQuery{
@@ -202,11 +199,9 @@ func (s *Server) SendCatalogQuery(deviceID string) error {
 	// 使用统一方法发送（根据设备 Transport 自动选择 TCP/UDP）
 	err = s.SendSIPMessageToDevice(device, sipMessage)
 	if err != nil {
-		log.Printf("[Catalog] [ERROR] 发送目录查询失败: %v", err)
 		return err
 	}
 
-	log.Printf("[Catalog] ✓ 已发送目录查询到设备 %s [%s]", deviceID, device.Transport)
 	return nil
 }
 

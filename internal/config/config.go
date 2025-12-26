@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -732,8 +733,16 @@ func (z *ZLMConfig) GenerateConfigINI() string {
 	sb.WriteString(fmt.Sprintf("appName=%s\n", z.Record.AppName))
 
 	// 设置录像文件路径（如果配置了独立录像目录）
+	// 必须使用绝对路径，否则会相对于ZLM工作目录
 	if z.Record.RecordPath != "" {
-		sb.WriteString(fmt.Sprintf("filePath=%s\n", z.Record.RecordPath))
+		recordPath := z.Record.RecordPath
+		// 将相对路径转换为绝对路径
+		if !strings.HasPrefix(recordPath, "/") {
+			if absPath, err := filepath.Abs(recordPath); err == nil {
+				recordPath = absPath
+			}
+		}
+		sb.WriteString(fmt.Sprintf("filePath=%s\n", recordPath))
 	}
 
 	sb.WriteString(fmt.Sprintf("fileBufSize=%d\n", z.Record.FileBufSize))

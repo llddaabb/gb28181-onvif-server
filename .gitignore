@@ -42,6 +42,10 @@ recordings/
 frontend/dist/
 frontend/node_modules/
 
+# 嵌入的前端文件（保留 .gitkeep）
+internal/frontend/dist/*
+!internal/frontend/dist/.gitkeep
+
 # Python
 __pycache__/
 *.py[cod]

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -15,14 +16,42 @@ import (
 
 // Server GB28181服务器结构体
 type Server struct {
-	config     *config.GB28181Config
-	listener   net.Listener // TCP 监听器
-	udpConn    *net.UDPConn // UDP 连接
-	devices    map[string]*Device
-	channels   map[string]*Channel // 通道列表
-	devicesMux sync.RWMutex
-	stopChan   chan struct{}
-	apiServer  interface{} // API服务器引用，用于通道同步
+	config           *config.GB28181Config
+	listener         net.Listener // TCP 监听器
+	udpConn          *net.UDPConn // UDP 连接
+	devices          map[string]*Device
+	channels         map[string]*Channel // 通道列表
+	devicesMux       sync.RWMutex
+	stopChan         chan struct{}
+	apiServer        interface{}                   // API服务器引用，用于通道同步
+	recordCache      map[string][]DeviceRecordInfo // 设备录像缓存，key为channelID
+	recordMux        sync.RWMutex                  // 录像缓存锁
+	playbackSessions map[string]*PlaybackSession   // 录像回放会话，key为streamID
+	playbackMux      sync.RWMutex                  // 回放会话锁
+	localIP          string                        // 本地可达 IP (用于向设备告诉 RTP 接收地址)
+}
+
+// PlaybackSession 录像回放会话
+type PlaybackSession struct {
+	StreamID   string    // 流ID
+	ChannelID  string    // 通道ID
+	SSRC       string    // SSRC
+	CallID     string    // SIP Call-ID
+	FromTag    string    // SIP From Tag
+	ToTag      string    // SIP To Tag
+	StartTime  string    // 录像开始时间
+	EndTime    string    // 录像结束时间
+	CreateTime time.Time // 会话创建时间
+	LocalPort  int       // 本地 RTP 端口
+	DeviceID   string    // 设备ID
+}
+
+// PlaybackInfo 回放信息（用于API返回）
+type PlaybackInfo struct {
+	StreamID  string `json:"streamId"`
+	SSRC      string `json:"ssrc"`
+	ChannelID string `json:"channelId"`
+	LocalPort int    `json:"localPort"` // 本地 RTP 接收端口
 }
 
 // Device GB28181设备结构体
@@ -70,10 +99,12 @@ type Channel struct {
 // NewServer 创建GB28181服务器实例
 func NewServer(cfg *config.GB28181Config) *Server {
 	return &Server{
-		config:   cfg,
-		devices:  make(map[string]*Device),
-		channels: make(map[string]*Channel),
-		stopChan: make(chan struct{}),
+		config:           cfg,
+		devices:          make(map[string]*Device),
+		channels:         make(map[string]*Channel),
+		stopChan:         make(chan struct{}),
+		recordCache:      make(map[string][]DeviceRecordInfo),
+		playbackSessions: make(map[string]*PlaybackSession),
 	}
 }
 
@@ -84,7 +115,17 @@ func (s *Server) SetAPIServer(apiServer interface{}) {
 
 // Start 启动GB28181服务器
 func (s *Server) Start() error {
+	// 重新初始化stopChan，防止重启时使用已关闭的channel
+	s.stopChan = make(chan struct{})
+
 	addr := fmt.Sprintf("%s:%d", s.config.SipIP, s.config.SipPort)
+
+	// 获取可达的本地 IP 地址（用于向设备告诉 RTP 接收地址）
+	s.localIP = s.getReachableIP()
+	if s.localIP == "" {
+		s.localIP = "127.0.0.1" // 备用方案
+	}
+	debug.Debug("gb28181", "本地可达 IP: %s", s.localIP)
 
 	// 启动 UDP 监听 (GB28181 标准主要使用 UDP)
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
@@ -128,14 +169,118 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// getReachableIP 获取可达的本地 IP 地址
+// 用于告诉外部设备应该向哪个 IP 地址发送 RTP 流
+func (s *Server) getReachableIP() string {
+	// 方法1：如果 config 中的 SipIP 是有效的 IP（不是 0.0.0.0），使用它
+	if s.config.SipIP != "0.0.0.0" && s.config.SipIP != "::" && net.ParseIP(s.config.SipIP) != nil {
+		return s.config.SipIP
+	}
+
+	// 方法2：通过连接到公网 DNS 来获取可达 IP（不发送数据）
+	conn, err := net.Dial("udp", "8.8.8.8:53")
+	if err == nil {
+		defer conn.Close()
+		localAddr := conn.LocalAddr().(*net.UDPAddr)
+		if localAddr.IP != nil {
+			ip := localAddr.IP.String()
+			if ip != "" && ip != "0.0.0.0" {
+				debug.Debug("gb28181", "通过 DNS 查询获得可达 IP: %s", ip)
+				return ip
+			}
+		}
+	}
+
+	// 方法3：获取第一个非 loopback 的 IPv4 地址
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				ipNet, ok := addr.(*net.IPNet)
+				if !ok || ipNet.IP.IsLoopback() {
+					continue
+				}
+				ip := ipNet.IP.To4()
+				if ip != nil {
+					debug.Debug("gb28181", "从网卡 %s 获得 IP: %s", iface.Name, ip.String())
+					return ip.String()
+				}
+			}
+		}
+	}
+
+	debug.Warn("gb28181", "无法自动检测可达 IP，将使用 127.0.0.1")
+	return ""
+}
+
+// getLocalIPForRemote 按远端设备 IP 选择本地出站 IP（用于多网卡/多IP环境）
+func (s *Server) getLocalIPForRemote(remoteIP string) string {
+	// 尝试建立到设备 SIP 端口的 UDP 连接，以获知路由选择的本地IP
+	// 不会真正发送数据，仅用于操作系统路由选择
+	addr := net.JoinHostPort(remoteIP, "5060")
+	conn, err := net.Dial("udp", addr)
+	if err == nil {
+		defer conn.Close()
+		if ua, ok := conn.LocalAddr().(*net.UDPAddr); ok && ua.IP != nil {
+			ip := ua.IP.To4()
+			if ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	// 回退到全局可达IP
+	if s.localIP != "" {
+		return s.localIP
+	}
+	return "127.0.0.1"
+}
+
 // Stop 停止GB28181服务器
 func (s *Server) Stop() error {
-	close(s.stopChan)
+	// 记录调用堆栈，帮助诊断谁调用了 Stop
+	log.Printf("[GB28181] ⚠️  Stop() 被调用！调用堆栈：")
+	debug.Warn("gb28181", "Stop() 被调用，打印调用堆栈：")
+
+	// 打印调用堆栈（跳过前2层：runtime.Caller和当前函数）
+	for i := 1; i <= 10; i++ {
+		pc, file, line, ok := runtime.Caller(i)
+		if !ok {
+			break
+		}
+		fn := runtime.FuncForPC(pc)
+		funcName := "unknown"
+		if fn != nil {
+			funcName = fn.Name()
+		}
+		log.Printf("  [%d] %s:%d %s", i, file, line, funcName)
+		debug.Warn("gb28181", "  [%d] %s:%d %s", i, file, line, funcName)
+	}
+
+	// 安全关闭stopChan，避免重复关闭
+	select {
+	case <-s.stopChan:
+		// 已经关闭，不再操作
+		debug.Debug("gb28181", "stopChan已经关闭，跳过")
+		log.Println("[GB28181] stopChan已经关闭，跳过重复关闭")
+	default:
+		log.Println("[GB28181] 正在关闭 stopChan...")
+		close(s.stopChan)
+	}
+
 	if s.udpConn != nil {
+		log.Println("[GB28181] 正在关闭 UDP 连接...")
 		s.udpConn.Close()
+		s.udpConn = nil
 	}
 	if s.listener != nil {
-		return s.listener.Close()
+		log.Println("[GB28181] 正在关闭 TCP listener...")
+		err := s.listener.Close()
+		s.listener = nil
+		return err
 	}
 	return nil
 }
@@ -185,12 +330,8 @@ func (s *Server) handleUDPMessage(data []byte, remoteAddr *net.UDPAddr) {
 		return
 	}
 
-	// 记录所有收到的消息（调试用）
-	log.Printf("[GB28181] <<< UDP收到 [%s] 来自 %s (响应=%v)", message.Type, remoteAddr, message.IsResponse)
-
 	// 如果是响应，进行响应处理
 	if message.IsResponse {
-		log.Printf("[GB28181] <<< 响应: %d %s", message.StatusCode, message.Reason)
 		debug.Debug("gb28181", "收到状态响应: %d %s 来自: %s", message.StatusCode, message.Reason, remoteAddr)
 		// 对于响应，我们需要向设备发送 ACK（如果是 INVITE 的2xx响应）
 		// 使用UDP连接发送 ACK
@@ -234,18 +375,46 @@ func (s *Server) acceptConnections() {
 	log.Println("[GB28181] TCP监听已启动，等待TCP连接...")
 
 	for {
+		// 首先检查服务是否已停止（非阻塞检查）
+		select {
+		case <-s.stopChan:
+			debug.Info("gb28181", "服务已停止，退出TCP接受循环")
+			log.Println("[GB28181] 停止接受客户端连接")
+			return
+		default:
+			// 继续处理
+		}
+
 		conn, err := s.listener.Accept()
 		if err != nil {
+			// 记录详细的错误信息用于诊断
+			log.Printf("[WARN] Accept错误: %v (类型: %T)", err, err)
+			debug.Warn("gb28181", "Accept错误详情: %v (类型: %T)", err, err)
+
+			// 再次检查 stopChan，确认是否是因为服务停止导致的错误
 			select {
 			case <-s.stopChan:
-				debug.Info("gb28181", "停止接受连接")
-				log.Println("[GB28181] 停止接受客户端连接")
+				debug.Info("gb28181", "检测到服务停止信号，停止接受连接")
+				log.Println("[GB28181] 停止接受客户端连接（服务已停止）")
 				return
 			default:
-				log.Printf("[WARN] 接受连接失败: %v", err)
-				debug.Warn("gb28181", "接受连接失败: %v", err)
-				continue
+				// stopChan 未关闭，说明不是服务停止导致的错误
 			}
+
+			// 检查是否是listener被关闭的错误
+			if strings.Contains(err.Error(), "use of closed network connection") ||
+				strings.Contains(err.Error(), "closed network connection") ||
+				strings.Contains(err.Error(), "listener closed") {
+				debug.Error("gb28181", "Listener意外关闭！这不应该发生（stopChan未关闭但listener关闭了）")
+				log.Println("[ERROR] [GB28181] Listener意外关闭！停止接受连接")
+				return
+			}
+
+			// 其他临时错误，记录日志后继续
+			log.Printf("[WARN] 接受连接失败，将继续尝试: %v", err)
+			debug.Warn("gb28181", "接受连接失败，将继续尝试: %v", err)
+			time.Sleep(100 * time.Millisecond) // 短暂延迟避免繁忙循环
+			continue
 		}
 
 		log.Printf("[GB28181] ✓ 收到TCP连接: %s", conn.RemoteAddr())
@@ -669,6 +838,425 @@ func (s *Server) QueryDeviceInfo(deviceID string) error {
 	return nil
 }
 
+// QueryRecordInfo 查询设备录像信息
+// channelID: 通道ID
+// startTime: 开始时间 (格式: 2025-12-23T00:00:00)
+// endTime: 结束时间 (格式: 2025-12-23T23:59:59)
+// recordType: 录像类型 (all/time/alarm/manual)
+func (s *Server) QueryRecordInfo(channelID, startTime, endTime, recordType string) error {
+	// 从通道ID获取设备ID (通常前缀相同)
+	var device *Device
+	var deviceID string
+
+	s.devicesMux.RLock()
+	for id, dev := range s.devices {
+		// 通道ID通常属于设备ID的前缀或者通过通道列表查找
+		for _, ch := range dev.Channels {
+			if ch.ChannelID == channelID {
+				device = dev
+				deviceID = id
+				break
+			}
+		}
+		if device != nil {
+			break
+		}
+	}
+	s.devicesMux.RUnlock()
+
+	if device == nil {
+		return fmt.Errorf("未找到通道 %s 所属的设备", channelID)
+	}
+
+	// 录像类型映射
+	typeMap := map[string]string{
+		"all":    "all",
+		"time":   "time",
+		"alarm":  "alarm",
+		"manual": "manual",
+	}
+	recType := typeMap[recordType]
+	if recType == "" {
+		recType = "all"
+	}
+
+	// 生成录像查询 XML (GB28181 标准格式)
+	sn := time.Now().UnixNano() % 1000000
+	queryXML := fmt.Sprintf(`<?xml version="1.0" encoding="GB2312"?>
+<Query>
+<CmdType>RecordInfo</CmdType>
+<SN>%d</SN>
+<DeviceID>%s</DeviceID>
+<StartTime>%s</StartTime>
+<EndTime>%s</EndTime>
+<Secrecy>0</Secrecy>
+<Type>%s</Type>
+</Query>`, sn, channelID, startTime, endTime, recType)
+
+	// 使用统一的方法构建 SIP MESSAGE
+	sipMessage := s.BuildSIPMessageString(device, channelID, "Application/MANSCDP+xml", queryXML)
+
+	// 使用统一的方法发送（根据设备 Transport 自动选择 TCP/UDP）
+	err := s.SendSIPMessageToDevice(device, sipMessage)
+	if err != nil {
+		log.Printf("[GB28181] 发送录像查询失败: %v", err)
+		return err
+	}
+
+	log.Printf("[GB28181] ✓ 已向设备 %s 发送录像查询请求 (通道: %s, 时间: %s ~ %s) [%s]",
+		deviceID, channelID, startTime, endTime, device.Transport)
+	return nil
+}
+
+// GetRecordList 获取通道的录像列表
+func (s *Server) GetRecordList(channelID string) []DeviceRecordInfo {
+	s.recordMux.RLock()
+	defer s.recordMux.RUnlock()
+	records, ok := s.recordCache[channelID]
+	if !ok {
+		return []DeviceRecordInfo{}
+	}
+	return records
+}
+
+// ClearRecordCache 清除通道的录像缓存
+func (s *Server) ClearRecordCache(channelID string) {
+	s.recordMux.Lock()
+	defer s.recordMux.Unlock()
+	delete(s.recordCache, channelID)
+}
+
+// StartRecordPlayback 启动设备端录像回放
+// 向设备发送 INVITE 请求，要求设备将指定时间段的录像以 RTP 流方式发送
+func (s *Server) StartRecordPlayback(channelID, startTime, endTime string) (*PlaybackInfo, error) {
+	// 查找通道所属设备
+	var device *Device
+	var deviceID string
+
+	s.devicesMux.RLock()
+	for id, dev := range s.devices {
+		for _, ch := range dev.Channels {
+			if ch.ChannelID == channelID {
+				device = dev
+				deviceID = id
+				break
+			}
+		}
+		if device != nil {
+			break
+		}
+	}
+	s.devicesMux.RUnlock()
+
+	if device == nil {
+		return nil, fmt.Errorf("未找到通道 %s 所属的设备", channelID)
+	}
+
+	// 生成 SSRC (用于标识 RTP 流)
+	// GB28181 规定: 回放SSRC第一位为1
+	ssrc := fmt.Sprintf("1%s%04d", s.config.Realm[3:8], time.Now().UnixNano()%10000)
+
+	// 生成流ID
+	streamID := fmt.Sprintf("%s_%d", channelID, time.Now().Unix())
+
+	// 选择一个可用端口接收 RTP (使用 ZLM 的 RTP 代理端口范围: 30000-35000)
+	zlmRtpPort := 30000 + int(time.Now().UnixNano()%5000)
+
+	// ZLM 接收地址选择：按设备所在网段选择本机出站IP（多网卡/多IP环境）
+	// 这样设备/NVR能在同一子网内向正确的地址发送RTP
+	zlmIP := s.getLocalIPForRemote(device.SipIP)
+
+	// 生成 SIP 会话标识
+	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), s.config.SipIP)
+	fromTag := fmt.Sprintf("playback%d", time.Now().UnixNano()%1000000)
+
+	// 构建 SDP (Session Description Protocol)
+	// 录像回放使用 playback 类型
+	// 告诉设备推送 RTP 流到 ZLM 的 RTP 代理端口，而不是我们的服务器
+	sdpContent := fmt.Sprintf(`v=0
+o=%s 0 0 IN IP4 %s
+s=Playback
+c=IN IP4 %s
+t=%s %s
+m=video %d RTP/AVP 96
+a=recvonly
+a=rtpmap:96 PS/90000
+y=%s
+f=`,
+		s.config.ServerID,
+		s.config.SipIP,
+		zlmIP, // RTP 流接收地址改为 ZLM
+		convertToNTP(startTime),
+		convertToNTP(endTime),
+		zlmRtpPort, // RTP 流接收端口使用 ZLM 的代理端口范围
+		ssrc,
+	)
+
+	// 构建 INVITE 请求
+	inviteRequest := s.buildPlaybackInvite(device, channelID, callID, fromTag, sdpContent)
+
+	// 记录发送的 INVITE 信息
+	log.Printf("[GB28181] 发送录像回放 INVITE: 目标设备=%s(%s:%d), Transport=%s, ZLM接收地址=%s:%d",
+		device.DeviceID, device.SipIP, device.SipPort, device.Transport, zlmIP, zlmRtpPort)
+
+	// 发送 INVITE
+	err := s.SendSIPMessageToDevice(device, inviteRequest)
+	if err != nil {
+		return nil, fmt.Errorf("发送 INVITE 失败: %w", err)
+	}
+
+	// 保存回放会话
+	session := &PlaybackSession{
+		StreamID:   streamID,
+		ChannelID:  channelID,
+		SSRC:       ssrc,
+		CallID:     callID,
+		FromTag:    fromTag,
+		StartTime:  startTime,
+		EndTime:    endTime,
+		CreateTime: time.Now(),
+		LocalPort:  zlmRtpPort, // 保存 ZLM 的 RTP 接收端口
+		DeviceID:   deviceID,
+	}
+
+	s.playbackMux.Lock()
+	s.playbackSessions[streamID] = session
+	s.playbackMux.Unlock()
+
+	log.Printf("[GB28181] ✓ 录像回放已启动: 通道=%s, 流ID=%s, SSRC=%s, ZLM接收端口=%d",
+		channelID, streamID, ssrc, zlmRtpPort)
+
+	return &PlaybackInfo{
+		StreamID:  streamID,
+		SSRC:      ssrc,
+		ChannelID: channelID,
+		LocalPort: zlmRtpPort, // 返回 ZLM 的 RTP 接收端口
+	}, nil
+}
+
+// StartRecordPlaybackWithPort 启动设备端录像回放（使用指定的端口和流ID）
+// 用于与 ZLM openRtpServer 配合使用
+func (s *Server) StartRecordPlaybackWithPort(channelID, startTime, endTime, streamID string, zlmRtpPort int) (*PlaybackInfo, error) {
+	// 查找通道所属设备
+	var device *Device
+	var deviceID string
+
+	s.devicesMux.RLock()
+	for id, dev := range s.devices {
+		for _, ch := range dev.Channels {
+			if ch.ChannelID == channelID {
+				device = dev
+				deviceID = id
+				break
+			}
+		}
+		if device != nil {
+			break
+		}
+	}
+	s.devicesMux.RUnlock()
+
+	if device == nil {
+		return nil, fmt.Errorf("未找到通道 %s 所属的设备", channelID)
+	}
+
+	// 生成 SSRC (用于标识 RTP 流)
+	// GB28181 规定: 回放SSRC第一位为1
+	ssrc := fmt.Sprintf("1%s%04d", s.config.Realm[3:8], time.Now().UnixNano()%10000)
+
+	// ZLM 接收地址选择：按设备所在网段选择本机出站IP（多网卡/多IP环境）
+	zlmIP := s.getLocalIPForRemote(device.SipIP)
+
+	// 生成 SIP 会话标识
+	callID := fmt.Sprintf("%d@%s", time.Now().UnixNano(), s.config.SipIP)
+	fromTag := fmt.Sprintf("playback%d", time.Now().UnixNano()%1000000)
+
+	// 构建 SDP (Session Description Protocol)
+	sdpContent := fmt.Sprintf(`v=0
+o=%s 0 0 IN IP4 %s
+s=Playback
+c=IN IP4 %s
+t=%s %s
+m=video %d RTP/AVP 96
+a=recvonly
+a=rtpmap:96 PS/90000
+y=%s
+f=`,
+		s.config.ServerID,
+		s.config.SipIP,
+		zlmIP,
+		convertToNTP(startTime),
+		convertToNTP(endTime),
+		zlmRtpPort,
+		ssrc,
+	)
+
+	// 构建 INVITE 请求
+	inviteRequest := s.buildPlaybackInvite(device, channelID, callID, fromTag, sdpContent)
+
+	// 记录发送的 INVITE 信息
+	log.Printf("[GB28181] 发送录像回放 INVITE: 目标设备=%s(%s:%d), Transport=%s, ZLM接收地址=%s:%d",
+		device.DeviceID, device.SipIP, device.SipPort, device.Transport, zlmIP, zlmRtpPort)
+
+	// 发送 INVITE
+	err := s.SendSIPMessageToDevice(device, inviteRequest)
+	if err != nil {
+		return nil, fmt.Errorf("发送 INVITE 失败: %w", err)
+	}
+
+	// 保存回放会话
+	session := &PlaybackSession{
+		StreamID:   streamID,
+		ChannelID:  channelID,
+		SSRC:       ssrc,
+		CallID:     callID,
+		FromTag:    fromTag,
+		StartTime:  startTime,
+		EndTime:    endTime,
+		CreateTime: time.Now(),
+		LocalPort:  zlmRtpPort,
+		DeviceID:   deviceID,
+	}
+
+	s.playbackMux.Lock()
+	s.playbackSessions[streamID] = session
+	s.playbackMux.Unlock()
+
+	log.Printf("[GB28181] ✓ 录像回放已启动: 通道=%s, 流ID=%s, SSRC=%s, ZLM接收端口=%d",
+		channelID, streamID, ssrc, zlmRtpPort)
+
+	return &PlaybackInfo{
+		StreamID:  streamID,
+		SSRC:      ssrc,
+		ChannelID: channelID,
+		LocalPort: zlmRtpPort,
+	}, nil
+}
+
+// StopRecordPlayback 停止设备端录像回放
+func (s *Server) StopRecordPlayback(channelID, streamID string) error {
+	s.playbackMux.Lock()
+	session, exists := s.playbackSessions[streamID]
+	if !exists {
+		// 尝试通过 channelID 查找
+		for sid, sess := range s.playbackSessions {
+			if sess.ChannelID == channelID {
+				session = sess
+				streamID = sid
+				exists = true
+				break
+			}
+		}
+	}
+	if exists {
+		delete(s.playbackSessions, streamID)
+	}
+	s.playbackMux.Unlock()
+
+	if !exists {
+		return fmt.Errorf("未找到回放会话: channelID=%s, streamID=%s", channelID, streamID)
+	}
+
+	// 查找设备
+	s.devicesMux.RLock()
+	device, deviceExists := s.devices[session.DeviceID]
+	s.devicesMux.RUnlock()
+
+	if !deviceExists {
+		return fmt.Errorf("设备 %s 不存在", session.DeviceID)
+	}
+
+	// 发送 BYE 结束会话
+	byeRequest := s.buildPlaybackBye(device, session)
+	err := s.SendSIPMessageToDevice(device, byeRequest)
+	if err != nil {
+		log.Printf("[GB28181] 发送 BYE 失败: %v", err)
+		// 即使发送失败也继续清理
+	}
+
+	log.Printf("[GB28181] ✓ 录像回放已停止: 通道=%s, 流ID=%s", channelID, streamID)
+	return nil
+}
+
+// buildPlaybackInvite 构建录像回放 INVITE 请求
+func (s *Server) buildPlaybackInvite(device *Device, channelID, callID, fromTag, sdp string) string {
+	branch := fmt.Sprintf("z9hG4bK%d", time.Now().UnixNano())
+	cseq := time.Now().Unix() % 100000
+
+	invite := fmt.Sprintf(`INVITE sip:%s@%s:%d SIP/2.0
+Via: SIP/2.0/%s %s:%d;rport;branch=%s
+Max-Forwards: 70
+From: <sip:%s@%s>;tag=%s
+To: <sip:%s@%s:%d>
+Call-ID: %s
+CSeq: %d INVITE
+Contact: <sip:%s@%s:%d>
+Content-Type: application/sdp
+Subject: %s:%s,%s:0
+Content-Length: %d
+
+%s`,
+		channelID, device.SipIP, device.SipPort,
+		device.Transport, s.config.SipIP, s.config.SipPort, branch,
+		s.config.ServerID, s.config.Realm, fromTag,
+		channelID, device.SipIP, device.SipPort,
+		callID,
+		cseq,
+		s.config.ServerID, s.config.SipIP, s.config.SipPort,
+		channelID, "0", s.config.ServerID, // Subject: 通道ID:ssrc序号,服务器ID:流序号
+		len(sdp),
+		sdp,
+	)
+
+	return invite
+}
+
+// buildPlaybackBye 构建录像回放 BYE 请求
+func (s *Server) buildPlaybackBye(device *Device, session *PlaybackSession) string {
+	branch := fmt.Sprintf("z9hG4bK%d", time.Now().UnixNano())
+	cseq := time.Now().Unix() % 100000
+
+	bye := fmt.Sprintf(`BYE sip:%s@%s:%d SIP/2.0
+Via: SIP/2.0/%s %s:%d;rport;branch=%s
+Max-Forwards: 70
+From: <sip:%s@%s>;tag=%s
+To: <sip:%s@%s:%d>%s
+Call-ID: %s
+CSeq: %d BYE
+Content-Length: 0
+
+`,
+		session.ChannelID, device.SipIP, device.SipPort,
+		device.Transport, s.config.SipIP, s.config.SipPort, branch,
+		s.config.ServerID, s.config.Realm, session.FromTag,
+		session.ChannelID, device.SipIP, device.SipPort,
+		func() string {
+			if session.ToTag != "" {
+				return ";tag=" + session.ToTag
+			}
+			return ""
+		}(),
+		session.CallID,
+		cseq,
+	)
+
+	return bye
+}
+
+// convertToNTP 将时间字符串转换为 NTP 时间戳（秒）
+// 输入格式: 2025-12-23T00:00:00
+func convertToNTP(timeStr string) string {
+	t, err := time.ParseInLocation("2006-01-02T15:04:05", timeStr, time.Local)
+	if err != nil {
+		// 尝试其他格式
+		t, err = time.ParseInLocation("2006-01-02 15:04:05", timeStr, time.Local)
+		if err != nil {
+			return "0"
+		}
+	}
+	return fmt.Sprintf("%d", t.Unix())
+}
+
 // SendSIPMessageToDevice 统一的 SIP 消息发送方法
 // 优先使用 TCP，如果设备明确指定 UDP 或 TCP 发送失败则使用 UDP
 func (s *Server) SendSIPMessageToDevice(device *Device, message string) error {
@@ -768,8 +1356,6 @@ func (s *Server) sendViaUDP(device *Device, message string) error {
 		IP:   net.ParseIP(device.SipIP),
 		Port: device.SipPort,
 	}
-
-	log.Printf("[GB28181] UDP发送目标: %s:%d (设备: %s)", device.SipIP, device.SipPort, device.DeviceID)
 
 	_, err := s.udpConn.WriteToUDP([]byte(message), remoteAddr)
 	if err != nil {

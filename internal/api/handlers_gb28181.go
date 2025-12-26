@@ -6,6 +6,7 @@ import (
 	"gb28181-onvif-server/internal/debug"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -464,4 +465,238 @@ func (s *Server) handleTestGB28181ChannelPreview(w http.ResponseWriter, r *http.
 			"rtmp_url":   res.RtmpURL,
 		},
 	})
+}
+
+// handleGB28181QueryRecordInfo 查询GB28181设备录像
+func (s *Server) handleGB28181QueryRecordInfo(w http.ResponseWriter, r *http.Request) {
+	channelID := r.URL.Query().Get("channelId")
+	startTime := r.URL.Query().Get("startTime")
+	endTime := r.URL.Query().Get("endTime")
+	recordType := r.URL.Query().Get("type") // all/time/alarm/manual
+
+	if channelID == "" {
+		respondBadRequest(w, "通道ID不能为空")
+		return
+	}
+
+	// 如果没有指定时间，默认查询当天
+	if startTime == "" || endTime == "" {
+		now := time.Now()
+		if startTime == "" {
+			startTime = now.Format("2006-01-02") + "T00:00:00"
+		}
+		if endTime == "" {
+			endTime = now.Format("2006-01-02") + "T23:59:59"
+		}
+	}
+
+	if recordType == "" {
+		recordType = "all"
+	}
+
+	// 清空该通道的旧缓存，以获取最新数据
+	s.gb28181Server.ClearRecordCache(channelID)
+
+	// 发送录像查询请求到设备
+	if err := s.gb28181Server.QueryRecordInfo(channelID, startTime, endTime, recordType); err != nil {
+		respondInternalError(w, fmt.Sprintf("发送录像查询失败: %v", err))
+		return
+	}
+
+	// GB28181录像查询是异步的，等待设备响应（最多等待3秒）
+	// 设备会通过MESSAGE返回录像列表
+	var records []interface{}
+	maxWaitTime := 3000 // 毫秒
+	pollInterval := 100 // 毫秒
+	elapsed := 0
+
+	for elapsed < maxWaitTime {
+		recordList := s.gb28181Server.GetRecordList(channelID)
+		if len(recordList) > 0 {
+			// 有结果，立即返回
+			for _, r := range recordList {
+				records = append(records, r)
+			}
+			break
+		}
+		time.Sleep(time.Duration(pollInterval) * time.Millisecond)
+		elapsed += pollInterval
+	}
+
+	// 返回查询结果（即使为空）
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"channelId": channelID,
+		"count":     len(records),
+		"records":   records,
+		"startTime": startTime,
+		"endTime":   endTime,
+		"type":      recordType,
+	})
+}
+
+// handleGB28181GetRecordList 获取GB28181设备录像列表（从缓存获取）
+func (s *Server) handleGB28181GetRecordList(w http.ResponseWriter, r *http.Request) {
+	channelID := r.URL.Query().Get("channelId")
+	if channelID == "" {
+		respondBadRequest(w, "通道ID不能为空")
+		return
+	}
+
+	// 从缓存获取录像列表
+	records := s.gb28181Server.GetRecordList(channelID)
+
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"channelId": channelID,
+		"count":     len(records),
+		"records":   records,
+	})
+}
+
+// handleGB28181ClearRecordCache 清除GB28181设备录像缓存
+func (s *Server) handleGB28181ClearRecordCache(w http.ResponseWriter, r *http.Request) {
+	channelID := r.URL.Query().Get("channelId")
+	if channelID == "" {
+		respondBadRequest(w, "通道ID不能为空")
+		return
+	}
+
+	s.gb28181Server.ClearRecordCache(channelID)
+
+	respondSuccessMsg(w, "录像缓存已清除")
+}
+
+// handleGB28181RecordPlayback 请求GB28181设备端录像回放
+// 通过 INVITE 请求设备将录像以 RTP 流方式直接发送到 ZLM，然后通过 ZLM 转为 FLV 流
+func (s *Server) handleGB28181RecordPlayback(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ChannelID string `json:"channelId"`
+		StartTime string `json:"startTime"` // 格式: 2025-12-23T00:00:00
+		EndTime   string `json:"endTime"`   // 格式: 2025-12-23T01:00:00
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondBadRequest(w, "无效的请求参数")
+		return
+	}
+
+	if req.ChannelID == "" {
+		respondBadRequest(w, "通道ID不能为空")
+		return
+	}
+
+	if req.StartTime == "" || req.EndTime == "" {
+		respondBadRequest(w, "开始时间和结束时间不能为空")
+		return
+	}
+
+	debug.Info("gb28181", "请求设备端录像回放: 通道=%s, 时间=%s ~ %s", req.ChannelID, req.StartTime, req.EndTime)
+
+	// 生成流ID（与 StartRecordPlayback 保持一致的格式）
+	streamID := fmt.Sprintf("%s_%d", req.ChannelID, time.Now().Unix())
+
+	// 1. 先在 ZLM 打开 RTP 接收端口
+	zlmClient := s.zlmServer.GetAPIClient()
+	rtpInfo, err := zlmClient.OpenRtpServer(streamID, 0, 0)
+	if err != nil {
+		respondInternalError(w, fmt.Sprintf("打开ZLM RTP端口失败: %v", err))
+		return
+	}
+	debug.Info("gb28181", "ZLM RTP端口已打开: stream=%s port=%d", streamID, rtpInfo.Port)
+
+	// 2. 发起录像回放请求（通过 GB28181 INVITE）
+	// 设备会直接将 RTP 流推送到 ZLM 的 RTP 接收端口
+	playbackInfo, err := s.gb28181Server.StartRecordPlaybackWithPort(req.ChannelID, req.StartTime, req.EndTime, streamID, rtpInfo.Port)
+	if err != nil {
+		// 清理 ZLM 端口
+		_ = zlmClient.CloseRtpServer(streamID)
+		respondInternalError(w, fmt.Sprintf("请求录像回放失败: %v", err))
+		return
+	}
+
+	// 设备现在直接推送到 ZLM，无需 FFmpeg 中转
+	debug.Info("gb28181", "设备将 RTP 流推送到 ZLM 的接收端口: %d", rtpInfo.Port)
+
+	// 获取 ZLM 配置信息用于构建播放地址
+	zlmHost := s.getZLMHost(r)
+	zlmHTTPPort, _, _ := s.getZLMPorts()
+
+	// 构建播放地址 - 使用 ZLM HTTP FLV 地址
+	// FLV 地址格式: http://host:port/rtp/stream_id.live.flv
+	// 设备推送到 ZLM 后，ZLM 会自动转换为 HTTP FLV 可访问的地址
+	directFlvURL := fmt.Sprintf("http://%s:%d/rtp/%s.live.flv", zlmHost, zlmHTTPPort, streamID)
+
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"message":   "录像回放已启动，请等待3-5秒后播放",
+		"channelId": req.ChannelID,
+		"startTime": req.StartTime,
+		"endTime":   req.EndTime,
+		"streamId":  streamID,
+		"ssrc":      playbackInfo.SSRC,
+		"flvUrl":    directFlvURL, // ZLM 直接提供的 FLV 地址
+	})
+}
+
+// handleGB28181StopRecordPlayback 停止GB28181设备端录像回放
+func (s *Server) handleGB28181StopRecordPlayback(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ChannelID string `json:"channelId"`
+		StreamID  string `json:"streamId"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondBadRequest(w, "无效的请求参数")
+		return
+	}
+
+	if req.ChannelID == "" && req.StreamID == "" {
+		respondBadRequest(w, "通道ID或流ID不能为空")
+		return
+	}
+
+	debug.Info("gb28181", "停止设备端录像回放: 通道=%s, 流=%s", req.ChannelID, req.StreamID)
+
+	// 发送 BYE 停止回放
+	if err := s.gb28181Server.StopRecordPlayback(req.ChannelID, req.StreamID); err != nil {
+		respondInternalError(w, fmt.Sprintf("停止录像回放失败: %v", err))
+		return
+	}
+
+	respondSuccessMsg(w, "录像回放已停止")
+}
+
+// handleStartGB28181Service 启动GB28181服务
+func (s *Server) handleStartGB28181Service(w http.ResponseWriter, r *http.Request) {
+	if s.gb28181Running {
+		respondSuccessMsg(w, "GB28181服务已在运行中")
+		return
+	}
+
+	if err := s.gb28181Server.Start(); err != nil {
+		respondInternalError(w, fmt.Sprintf("启动GB28181服务失败: %v", err))
+		return
+	}
+
+	s.gb28181Running = true
+	debug.Info("gb28181", "GB28181服务已启动")
+	respondSuccessMsg(w, "GB28181服务已启动")
+}
+
+// handleStopGB28181Service 停止GB28181服务
+func (s *Server) handleStopGB28181Service(w http.ResponseWriter, r *http.Request) {
+	if !s.gb28181Running {
+		respondSuccessMsg(w, "GB28181服务已停止")
+		return
+	}
+
+	if err := s.gb28181Server.Stop(); err != nil {
+		respondInternalError(w, fmt.Sprintf("停止GB28181服务失败: %v", err))
+		return
+	}
+
+	s.gb28181Running = false
+	debug.Info("gb28181", "GB28181服务已停止")
+	respondSuccessMsg(w, "GB28181服务已停止")
 }
