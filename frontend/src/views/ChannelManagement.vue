@@ -54,6 +54,9 @@
         <div class="card-header">
           <span class="title">📺 通道列表</span>
           <div class="header-actions">
+            <el-button type="warning" :icon="Download" @click="importChannelsFromDevices" :loading="importLoading">
+              从设备导入
+            </el-button>
             <el-button type="primary" :icon="Plus" @click="showAddChannelDialog">
               添加通道
             </el-button>
@@ -371,7 +374,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, WarningFilled, InfoFilled } from '@element-plus/icons-vue'
+import { Plus, Refresh, WarningFilled, InfoFilled, Download } from '@element-plus/icons-vue'
 import PreviewPlayer from '../components/PreviewPlayer.vue'
 
 interface Channel {
@@ -416,8 +419,21 @@ interface PushTarget {
   loading?: boolean
 }
 
+interface ZLMConfig {
+  http: { port: number }
+  rtsp: { port: number }
+  rtmp: { port: number }
+}
+
 const channels = ref<Channel[]>([])
 const selectedChannel = ref<Channel | null>(null)
+
+// ZLM配置
+const zlmConfig = ref<ZLMConfig>({
+  http: { port: 8081 },
+  rtsp: { port: 8554 },
+  rtmp: { port: 1935 }
+})
 const loading = ref(false)
 const addLoading = ref(false)
 const addChannelDialogVisible = ref(false)
@@ -425,6 +441,7 @@ const previewDialogVisible = ref(false)
 const previewLoading = ref(false)
 const previewError = ref('')
 const playType = ref<'flv' | 'hls'>('flv')
+const importLoading = ref(false)
 
 // 录像状态管理
 const recordingChannels = ref<Set<string>>(new Set())
@@ -535,6 +552,20 @@ const selectedPlatformTemplate = computed(() => {
 // 定时刷新
 let refreshTimer: number | null = null
 
+// 获取 ZLM 配置
+const fetchZLMConfig = async () => {
+  try {
+    const response = await fetch('/api/zlm/config')
+    const data = await response.json()
+    if (data.success && data.config) {
+      zlmConfig.value = data.config
+      console.log('获取到ZLM配置:', data.config)
+    }
+  } catch (error) {
+    console.error('获取ZLM配置失败:', error)
+  }
+}
+
 // 获取通道列表
 const fetchChannels = async () => {
   loading.value = true
@@ -577,6 +608,102 @@ const fetchChannelsFromDevices = async () => {
     }
   } catch (error) {
     console.error('从设备获取通道失败:', error)
+  }
+}
+
+// 从设备导入通道到数据库
+const importChannelsFromDevices = async () => {
+  importLoading.value = true
+  try {
+    // 获取GB28181设备的通道
+    const gb28181Response = await fetch('/api/gb28181/devices')
+    const gb28181Data = await gb28181Response.json()
+    
+    const channelsToImport: any[] = []
+    
+    // 收集GB28181通道
+    if (gb28181Data.devices) {
+      for (const device of gb28181Data.devices) {
+        if (device.channels && device.channels.length > 0) {
+          for (const ch of device.channels) {
+            channelsToImport.push({
+              channelId: ch.channelId,
+              name: ch.name,
+              deviceId: device.deviceId,
+              deviceType: 'gb28181',
+              manufacturer: ch.manufacturer || '',
+              model: ch.model || '',
+              status: ch.status || 'ON',
+              streamUrl: ch.streamURL || '',
+              longitude: ch.longitude || '',
+              latitude: ch.latitude || ''
+            })
+          }
+        }
+      }
+    }
+    
+    // 获取ONVIF设备的通道
+    try {
+      const onvifResponse = await fetch('/api/onvif/devices')
+      const onvifData = await onvifResponse.json()
+      
+      if (onvifData.devices) {
+        for (const device of onvifData.devices) {
+          // ONVIF设备每个profile作为一个通道
+          const profilesResp = await fetch(`/api/onvif/devices/${encodeURIComponent(device.uuid)}/profiles`)
+          if (profilesResp.ok) {
+            const profilesData = await profilesResp.json()
+            if (profilesData.profiles) {
+              for (const profile of profilesData.profiles) {
+                channelsToImport.push({
+                  channelId: `${device.uuid}_${profile.token}`,
+                  name: profile.name || device.name,
+                  deviceId: device.uuid,
+                  deviceType: 'onvif',
+                  manufacturer: device.manufacturer || '',
+                  model: device.model || '',
+                  status: device.status === 'online' ? 'ON' : 'OFF',
+                  streamUrl: profile.streamUri || '',
+                  profileToken: profile.token
+                })
+              }
+            }
+          }
+        }
+      }
+    } catch (onvifError) {
+      console.warn('获取ONVIF设备失败:', onvifError)
+    }
+    
+    if (channelsToImport.length === 0) {
+      ElMessage.warning('没有找到可导入的通道')
+      return
+    }
+    
+    // 调用导入API
+    const importResponse = await fetch('/api/channel/import', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ channels: channelsToImport })
+    })
+    
+    const importResult = await importResponse.json()
+    
+    if (importResult.success) {
+      ElMessage.success(`导入成功：添加 ${importResult.addedCount} 个通道${importResult.failedCount > 0 ? `，失败 ${importResult.failedCount} 个` : ''}`)
+      // 刷新通道列表
+      await fetchChannels()
+    } else {
+      ElMessage.error('导入失败：' + (importResult.error || importResult.message))
+    }
+  } catch (error) {
+    console.error('导入通道失败:', error)
+    ElMessage.error('导入通道失败，请查看控制台')
+  } finally {
+    importLoading.value = false
   }
 }
 
@@ -723,12 +850,13 @@ const toggleAIRecording = async (channel: Channel) => {
     const action = currentlyAIRecording ? 'stop' : 'start'
     const endpoint = `/api/ai/recording/${action}`
     
+    const rtspPort = zlmConfig.value.rtsp.port
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         channel_id: channelId,
-        stream_url: channel.streamUrl || `rtsp://localhost:8554/live/${channelId}`,
+        stream_url: channel.streamUrl || `rtsp://localhost:${rtspPort}/live/${channelId}`,
         mode: 'person'
       })
     })
@@ -811,7 +939,8 @@ const copyUrl = (url: string) => {
 // 复制流地址
 const copyStreamUrl = (channel: Channel) => {
   const host = window.location.hostname
-  const url = `rtsp://${host}:8554/rtp/${channel.channelId}`
+  const rtspPort = zlmConfig.value.rtsp.port
+  const url = `rtsp://${host}:${rtspPort}/rtp/${channel.channelId}`
   copyUrl(url)
 }
 
@@ -890,8 +1019,9 @@ const addPushTarget = async () => {
   pushLoading.value = true
   try {
     const host = window.location.hostname
+    const rtspPort = zlmConfig.value.rtsp.port
     // 构建源流地址 - 使用 RTSP 地址
-    const sourceUrl = pushChannel.value.streamUrl || `rtsp://${host}:8554/rtp/${pushChannel.value.channelId}`
+    const sourceUrl = pushChannel.value.streamUrl || `rtsp://${host}:${rtspPort}/rtp/${pushChannel.value.channelId}`
     
     const response = await fetch('/api/push/targets', {
       method: 'POST',
@@ -1016,6 +1146,7 @@ const deletePushTarget = async (targetId: string) => {
 // ========== 推流方法结束 ==========
 
 onMounted(async () => {
+  await fetchZLMConfig()
   await fetchChannels()
   fetchDevices()
   // 获取录像状态

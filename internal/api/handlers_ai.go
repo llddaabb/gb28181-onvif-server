@@ -308,10 +308,33 @@ func (s *Server) handleStopAllAIRecording(w http.ResponseWriter, r *http.Request
 // 查询参数:
 //   - channel_id: 通道ID（必需）
 //   - date: 查询日期，格式: 2025-12-07（可选，不指定则查询所有日期）
+//   - page: 页码，从1开始（可选，默认1）
+//   - page_size: 每页数量（可选，默认20）
 func (s *Server) handleListAIRecordings(w http.ResponseWriter, r *http.Request) {
 	channelID := r.URL.Query().Get("channel_id")
 	dateStr := r.URL.Query().Get("date") // 格式: 2025-12-07
 	app := "rtp"                         // AI录像统一使用rtp应用
+
+	// 分页参数
+	page := 1
+	pageSize := 20
+	if p := r.URL.Query().Get("page"); p != "" {
+		if pn, err := fmt.Sscanf(p, "%d", &page); err == nil && pn > 0 {
+			if page < 1 {
+				page = 1
+			}
+		}
+	}
+	if ps := r.URL.Query().Get("page_size"); ps != "" {
+		if pn, err := fmt.Sscanf(ps, "%d", &pageSize); err == nil && pn > 0 {
+			if pageSize < 1 {
+				pageSize = 20
+			}
+			if pageSize > 100 {
+				pageSize = 100
+			}
+		}
+	}
 
 	if channelID == "" {
 		s.jsonError(w, http.StatusBadRequest, "缺少channel_id参数")
@@ -389,13 +412,39 @@ func (s *Server) handleListAIRecordings(w http.ResponseWriter, r *http.Request) 
 		return ti > tj
 	})
 
+	// 分页处理
+	totalCount := len(recordings)
+	totalPages := (totalCount + pageSize - 1) / pageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	// 计算分页范围
+	startIdx := (page - 1) * pageSize
+	endIdx := startIdx + pageSize
+	if startIdx > totalCount {
+		startIdx = totalCount
+	}
+	if endIdx > totalCount {
+		endIdx = totalCount
+	}
+
+	// 获取当前页数据
+	pagedRecordings := recordings[startIdx:endIdx]
+
 	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"channelId":  channelID,
 		"date":       dateStr,
 		"app":        app,
 		"recordPath": channelRecordPath,
-		"total":      len(recordings),
-		"recordings": recordings,
+		"total":      totalCount,
+		"page":       page,
+		"pageSize":   pageSize,
+		"totalPages": totalPages,
+		"recordings": pagedRecordings,
 	})
 }

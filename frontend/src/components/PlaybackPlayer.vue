@@ -7,7 +7,16 @@
       <div v-if="error" class="video-error">
         <el-icon size="48"><VideoCamera /></el-icon>
         <p>{{ error }}</p>
-        <el-button type="primary" @click="retry">重试</el-button>
+        <p v-if="isH265EncodingError" class="error-hint">
+          您的浏览器不支持 H.265 视频编码格式。
+          <br>请下载视频文件后使用 VLC 或其他播放器观看。
+        </p>
+        <div class="error-actions">
+          <el-button type="primary" @click="retry">重试</el-button>
+          <el-button v-if="downloadUrl" type="success" @click="downloadVideo">
+            <el-icon><Download /></el-icon> 下载视频
+          </el-button>
+        </div>
       </div>
 
       <!-- 回放控制栏 -->
@@ -102,7 +111,7 @@
 <script setup lang="ts">
 import { ref, onUnmounted, onMounted, nextTick, watch, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { VideoCamera } from '@element-plus/icons-vue'
+import { VideoCamera, Download } from '@element-plus/icons-vue'
 
 /**
  * 动态获取 Jessibuca 构造函数
@@ -142,6 +151,44 @@ async function getJessibuca() {
   throw new Error('Jessibuca not found on window after loading script')
 }
 
+/**
+ * 动态加载 EasyPlayerPro (支持 H.265 软解码)
+ */
+async function getEasyPlayerPro() {
+  const w = (window as any)
+  if (w && w.EasyPlayerPro) {
+    return w.EasyPlayerPro
+  }
+
+  const scriptUrl = '/easyplayer/EasyPlayer-pro.js'
+  await new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${scriptUrl}"]`)
+    if (existing) {
+      if ((existing as HTMLScriptElement).getAttribute('data-loaded') === '1') {
+        resolve()
+      } else {
+        existing.addEventListener('load', () => resolve())
+        existing.addEventListener('error', () => reject(new Error('Failed to load EasyPlayer script')))
+      }
+      return
+    }
+    const s = document.createElement('script')
+    s.src = scriptUrl
+    s.async = true
+    s.onload = () => {
+      s.setAttribute('data-loaded', '1')
+      resolve()
+    }
+    s.onerror = () => reject(new Error('Failed to load EasyPlayer script'))
+    document.head.appendChild(s)
+  })
+
+  if (w && w.EasyPlayerPro) {
+    return w.EasyPlayerPro
+  }
+  throw new Error('EasyPlayerPro not found on window after loading script')
+}
+
 interface RecordingInfo {
   fileName?: string
   name?: string
@@ -173,6 +220,10 @@ const props = defineProps({
   autoplay: { type: Boolean, default: true },
   // 默认高度
   defaultHeight: { type: [Number, String], required: false, default: 480 },
+  // 强制按 H.265 软解（后端检测到 HEVC 时传入）
+  forceH265: { type: Boolean, default: false },
+  // 可选的编码提示
+  codec: { type: String, required: false, default: '' },
 })
 
 const emit = defineEmits(['playing', 'paused', 'ended', 'error', 'timeupdate', 'fullscreenChange'])
@@ -182,6 +233,7 @@ const rootRef = ref<HTMLElement | null>(null)
 const containerId = `playback-container-${Math.random().toString(36).slice(2,9)}`
 const loading = ref(false)
 const error = ref('')
+const isH265EncodingError = ref(false)
 const isFullscreen = ref(false)
 const isPlaying = ref(false)
 const isPaused = ref(false)
@@ -199,6 +251,7 @@ const volume = ref(80)
 
 let playerInstance: any = null
 let nativeVideoElement: HTMLVideoElement | null = null
+let easyPlayerInstance: any = null  // EasyPlayerPro 实例
 let progressTimer: number | null = null
 
 // 计算实际使用的播放URL
@@ -212,12 +265,26 @@ const effectivePlayUrl = computed(() => {
   return ''
 })
 
+// 下载URL
+const downloadUrl = computed(() => {
+  return props.downloadUrl || props.mp4Url || props.playUrl || ''
+})
+
+// 是否为 MP4 源
+const isMp4Source = computed(() => {
+  const url = effectivePlayUrl.value
+  if (!url) return false
+  return url.endsWith('.mp4') || url.includes('.mp4?')
+})
 
 // 判断是否使用原生 video 元素（MP4 格式）
 const useNativeVideo = computed(() => {
-  const url = effectivePlayUrl.value
-  return url && (url.endsWith('.mp4') || url.includes('.mp4?') || !url.includes('.flv'))
+  // 完全禁用原生 video 标签，所有播放都使用软解
+  return false
 })
+
+// H.265 检测状态 - 不使用 h265webjs，直接提供下载
+const detectedH265 = ref(false)
 
 /**
  * 初始化播放器
@@ -246,6 +313,9 @@ const initPlayer = async () => {
     if (useNativeVideo.value) {
       // 使用原生 HTML5 Video 播放 MP4
       await initNativeVideoPlayer(container, url)
+    } else if (isMp4Source.value) {
+      // MP4 且标记为 H.265 时，直接使用 EasyPlayerPro 软解
+      await initEasyPlayer(container, url)
     } else {
       // 使用 Jessibuca 播放 FLV 流
       await initJessibucaPlayer(container, url)
@@ -278,20 +348,115 @@ const initNativeVideoPlayer = async (container: HTMLElement, url: string) => {
   video.style.objectFit = 'contain'
   video.style.backgroundColor = '#000'
   
+  // H.265 检测
+  let hasVideoFrame = false
+  let checkCount = 0
+  const maxChecks = 6
+  let switchedToEasyPlayer = false  // 防止重复切换
+  
+  const switchToEasyPlayer = async () => {
+    if (switchedToEasyPlayer) return  // 防止重复调用
+    switchedToEasyPlayer = true
+    
+    console.log('[PlaybackPlayer] H.265 detected, switching to EasyPlayerPro for soft decoding')
+    
+    // 先移除所有事件监听器，防止触发错误
+    video.onloadedmetadata = null
+    video.onloadeddata = null
+    video.ontimeupdate = null
+    video.onplay = null
+    video.onpause = null
+    video.onended = null
+    video.onerror = null
+    
+    video.pause()
+    video.src = ''
+    
+    // 从 DOM 移除 video 元素
+    if (video.parentNode) {
+      video.parentNode.removeChild(video)
+    }
+    
+    nativeVideoElement = null
+    detectedH265.value = true
+    loading.value = true
+    
+    // 检查容器是否仍然有效
+    const currentContainer = document.getElementById(containerId)
+    if (!currentContainer) {
+      console.error('[PlaybackPlayer] Container not found, cannot switch to EasyPlayer')
+      error.value = '播放器容器不存在'
+      loading.value = false
+      return
+    }
+    
+    try {
+      // 使用 EasyPlayerPro 播放 H.265
+      await initEasyPlayer(currentContainer, url)
+    } catch (e: any) {
+      console.error('[PlaybackPlayer] EasyPlayerPro init failed:', e)
+      // EasyPlayer 初始化失败，显示下载提示
+      error.value = '您的浏览器不支持 H.265 视频编码格式'
+      isH265EncodingError.value = true
+      loading.value = false
+    }
+  }
+  
+  const checkVideoDecoding = () => {
+    if (switchedToEasyPlayer) return  // 已切换，停止检查
+    checkCount++
+    // 如果视频已在播放但宽高为0，说明解码失败（H.265）
+    if (video.readyState >= 2 && !video.paused && video.currentTime > 0) {
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        if (checkCount >= maxChecks && !hasVideoFrame) {
+          switchToEasyPlayer()
+          return
+        }
+      } else {
+        hasVideoFrame = true
+      }
+    }
+    if (checkCount < maxChecks && !hasVideoFrame && !error.value && !switchedToEasyPlayer) {
+      setTimeout(checkVideoDecoding, 500)
+    }
+  }
+  
   // 事件监听
   video.onloadedmetadata = () => {
     duration.value = video.duration || props.videoDuration || 0
-    console.log('[PlaybackPlayer] Video duration:', duration.value)
+    console.log('[PlaybackPlayer] Video duration:', duration.value, 'videoWidth:', video.videoWidth, 'videoHeight:', video.videoHeight)
+    
+    // 如果元数据加载完但视频尺寸为0，可能是H.265
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      console.warn('[PlaybackPlayer] Video dimensions are 0, checking decoding...')
+      setTimeout(checkVideoDecoding, 1000)
+    }
+  }
+  
+  video.onloadeddata = () => {
+    console.log('[PlaybackPlayer] Video data loaded, videoWidth:', video.videoWidth)
+    if (video.videoWidth > 0 && video.videoHeight > 0) {
+      hasVideoFrame = true
+    }
   }
   
   video.ontimeupdate = () => {
+    if (switchedToEasyPlayer) return
     currentProgress.value = video.currentTime
     emit('timeupdate', video.currentTime)
+    
+    // 持续检测：如果播放了一段时间但仍没有视频帧
+    if (!hasVideoFrame && video.currentTime > 2 && (video.videoWidth === 0 || video.videoHeight === 0)) {
+      console.warn('[PlaybackPlayer] Playing but no video frames detected, likely H.265')
+      switchToEasyPlayer()
+    }
   }
   
   video.onplay = () => {
     isPaused.value = false
     emit('playing')
+    // 开始检测视频解码
+    setTimeout(checkVideoDecoding, 1000)
   }
   
   video.onpause = () => {
@@ -305,8 +470,26 @@ const initNativeVideoPlayer = async (container: HTMLElement, url: string) => {
   }
   
   video.onerror = (e) => {
+    // 如果已切换到 EasyPlayer，忽略这个错误
+    if (switchedToEasyPlayer) return
+    
     console.error('[PlaybackPlayer] Video error:', e)
-    error.value = '视频加载失败，可能是编码格式不支持'
+    // 检查是否是编码格式不支持（通常是H.265）
+    const videoError = (video as any).error
+    if (videoError) {
+      console.log('[PlaybackPlayer] Video error code:', videoError.code, 'message:', videoError.message)
+      // MEDIA_ERR_SRC_NOT_SUPPORTED (4) 或 MEDIA_ERR_DECODE (3) 通常表示编码不支持
+      if (videoError.code === 3 || videoError.code === 4) {
+        error.value = '浏览器不支持此视频编码格式'
+        isH265EncodingError.value = true
+      } else {
+        error.value = '视频加载失败'
+        isH265EncodingError.value = false
+      }
+    } else {
+      error.value = '视频加载失败'
+      isH265EncodingError.value = false
+    }
     emit('error', e)
   }
   
@@ -320,17 +503,193 @@ const initNativeVideoPlayer = async (container: HTMLElement, url: string) => {
 }
 
 /**
- * 使用 Jessibuca 播放 FLV 流
+ * 使用 EasyPlayerPro 播放 H.265 视频 (WASM 软解码)
+ */
+const initEasyPlayer = async (container: HTMLElement, url: string) => {
+  // 验证容器
+  if (!container || !container.parentNode) {
+    throw new Error('EasyPlayer container is invalid')
+  }
+  
+  const EasyPlayerProClass = await getEasyPlayerPro()
+  
+  // 清理容器内容
+  container.innerHTML = ''
+  
+  // 创建播放器容器 div（EasyPlayer 需要一个空的容器）
+  const playerDiv = document.createElement('div')
+  playerDiv.style.width = '100%'
+  playerDiv.style.height = '100%'
+  playerDiv.style.position = 'relative'
+  playerDiv.style.backgroundColor = '#000'
+  container.appendChild(playerDiv)
+  
+  let fetchErrorCount = 0  // 记录 fetchError 次数
+  
+  const player = new EasyPlayerProClass(playerDiv, {
+    isLive: false,  // 点播模式
+    hasAudio: true,
+    isMute: isMuted.value,
+    stretch: true,   // 拉伸填充容器
+    bufferTime: 0.5,
+    loadTimeOut: 30,
+    loadTimeReplay: 3,
+    // 强制 WASM 软解码 H.265
+    isH265: true,     // 明确告诉播放器这是 H.265
+    MSE: false,       // 禁用 MSE（浏览器 MSE 不支持 H.265）
+    useMSE: false,    // 禁用 MSE
+    WCS: false,       // 关闭 WebCodec
+    useWCS: false,
+    WASM: true,       // 启用 WASM 软解码
+    useWasm: true,
+    useSIMD: true,    // 使用 SIMD 加速
+    autoWasm: false,  // 不自动切换，强制 WASM
+    hardDecodingNotSupportAutoWasm: false,
+    decoderErrorAutoWasm: false,  // 禁止错误时自动切换
+    // 关键：强制使用 WASM 解码 MP4（而不是 MSE）
+    isWasmMp4: true,
+    // 禁止所有自动重播行为（重播会切换到 MSE）
+    streamErrorReplay: false,
+    streamEndReplay: false,
+    loadingTimeoutReplay: false,
+    heartTimeoutReplay: false,
+    mseDecodeErrorReplay: false,
+    wcsDecodeErrorReplay: false,
+    wasmDecodeErrorReplay: false,
+    simdDecodeErrorReplay: false,
+    playFailedAndReplay: false,
+    gpuDecoder: false,
+    canvasRender: true,  // 使用 Canvas 渲染
+    useCanvasRender: true,
+    useVideoRender: false,
+    mseUseCanvasRender: false,  // 即使 MSE 也禁用
+    // playbackConfig 中也要禁用 MSE
+    playbackConfig: {
+      useMSE: false,
+      useWCS: false,
+      isH265: true,
+      isMp4: true,
+      isWasmMp4: true,
+      hasLive: false,
+    },
+    debug: true,   // 开启调试
+    isBand: false,
+    btns: {
+      fullscreen: false,
+      screenshot: false,
+      play: false,
+      audio: false,
+      record: false,
+      stretch: false,
+      zoom: false,
+      ptz: false,
+      quality: false,
+    }
+  })
+  
+  // 事件监听
+  player.on('play', () => {
+    console.log('[PlaybackPlayer] EasyPlayer play')
+    isPaused.value = false
+    loading.value = false
+    emit('playing')
+  })
+  
+  player.on('pause', () => {
+    isPaused.value = true
+    emit('paused')
+  })
+  
+  player.on('videoInfo', (info: any) => {
+    console.log('[PlaybackPlayer] EasyPlayer videoInfo:', info)
+    if (info && info.duration) {
+      duration.value = info.duration
+    }
+  })
+  
+  player.on('timestamps', (ts: number) => {
+    // 播放时间回调（秒）
+    currentProgress.value = ts
+    emit('timeupdate', ts)
+  })
+  
+  player.on('liveEnd', () => {
+    console.log('[PlaybackPlayer] EasyPlayer playback ended')
+    isPlaying.value = false
+    emit('ended')
+  })
+  
+  player.on('error', (e: any) => {
+    // fetchError 是初始加载时的常见错误，手动重试最多3次
+    if (e === 'fetchError' || (e && e.message && e.message.includes('fetch'))) {
+      fetchErrorCount++
+      console.warn(`[PlaybackPlayer] EasyPlayer fetchError (${fetchErrorCount}/3)`)
+      if (fetchErrorCount < 3) {
+        // 手动重试
+        setTimeout(() => {
+          if (easyPlayerInstance) {
+            console.log(`[PlaybackPlayer] EasyPlayer 重试播放 (${fetchErrorCount}/3)`)
+            easyPlayerInstance.play(url).catch(() => {})
+          }
+        }, 1000)
+        return  // 不报错，等待重试
+      }
+    }
+    console.error('[PlaybackPlayer] EasyPlayer error:', e)
+    error.value = 'H.265 视频播放出错'
+    isH265EncodingError.value = true
+    loading.value = false
+    emit('error', e)
+  })
+  
+  player.on('timeout', () => {
+    console.warn('[PlaybackPlayer] EasyPlayer timeout')
+    if (retryCount.value < maxRetries) {
+      retryCount.value++
+      console.log(`[PlaybackPlayer] EasyPlayer timeout retry (${retryCount.value}/${maxRetries})`)
+      setTimeout(() => {
+        if (easyPlayerInstance) {
+          easyPlayerInstance.play(url).catch(() => {})
+        }
+      }, 2000)
+    } else {
+      error.value = '视频播放超时，请下载视频文件观看'
+      isH265EncodingError.value = true
+      loading.value = false
+      emit('error', new Error('timeout'))
+    }
+  })
+  
+  // 开始播放 - MP4 点播使用 playback()
+  // 由于我们已经在配置中强制 WASM: true, MSE: false, isWasmMp4: true
+  // playback() 会尊重这些配置使用 WASM 软解而不是 MSE
+  console.log('[PlaybackPlayer] Starting EasyPlayer playback with URL:', url)
+  await player.playback(url)
+  easyPlayerInstance = player
+  
+  // 设置时长
+  if (props.videoDuration) {
+    duration.value = props.videoDuration
+  } else if (props.recordingInfo?.duration) {
+    duration.value = props.recordingInfo.duration
+  }
+  
+  loading.value = false
+  console.log('[PlaybackPlayer] EasyPlayer initialized')
+}
+
+/**
+ * 使用 Jessibuca 播放（支持H.265的MP4文件和FLV流）
  */
 const initJessibucaPlayer = async (container: HTMLElement, url: string) => {
   const JessibucaClass = await getJessibuca()
   
   const player = new JessibucaClass({
     container: container,
-    videoBuffer: 1,      // 增加缓冲区，给设备端录像更多时间
+    videoBuffer: 0.5,    // 录像回放使用较小的缓冲
     isResize: true,
     text: '',
-    loadingText: '正在连接设备...',
+    loadingText: '正在加载录像...',
     debug: false,
     showBandwidth: false,
     operateBtns: {
@@ -338,6 +697,7 @@ const initJessibucaPlayer = async (container: HTMLElement, url: string) => {
       screenshot: false,
       play: false,
       audio: false,
+      recorder: false
     },
     forceNoOffscreen: true,
     isNotMute: !isMuted.value,
@@ -345,8 +705,10 @@ const initJessibucaPlayer = async (container: HTMLElement, url: string) => {
     // 关键配置：decoder 和 wasm 路径
     decoder: '/jessibuca/decoder.js',
     wasmPath: '/jessibuca/decoder.wasm',
-    useMSE: false,  // 关闭 MSE，使用 HTTP FLV
+    useMSE: url.includes('.flv'),  // FLV使用MSE，MP4不使用
     useWCS: false,  // 关闭 WebCodec
+    // MP4录像需要的配置
+    isLive: false,  // 录像回放不是直播
     // 增加超时时间（设备端录像推流可能需要更长时间）
     loadingTimeout: 20,   // 20秒加载超时
     heartTimeout: 15,     // 15秒心跳超时
@@ -359,9 +721,33 @@ const initJessibucaPlayer = async (container: HTMLElement, url: string) => {
     emit('playing')
   })
   
+  player.on('loadfinish', () => {
+    console.log('[PlaybackPlayer] Jessibuca loadfinish')
+    loading.value = false
+  })
+  
+  player.on('videoInfo', (info: any) => {
+    console.log('[PlaybackPlayer] Video info:', info)
+    if (info && info.width && info.height) {
+      console.log(`[PlaybackPlayer] Video resolution: ${info.width}x${info.height}`)
+    }
+  })
+  
+  player.on('timeUpdate', (ts: number) => {
+    // Jessibuca的timeUpdate返回的是毫秒
+    currentProgress.value = ts / 1000
+    emit('timeupdate', currentProgress.value)
+  })
+  
   player.on('pause', () => {
     isPaused.value = true
     emit('paused')
+  })
+  
+  player.on('playbackEnded', () => {
+    console.log('[PlaybackPlayer] Playback ended')
+    isPlaying.value = false
+    emit('ended')
   })
   
   player.on('error', (e: any) => {
@@ -376,7 +762,8 @@ const initJessibucaPlayer = async (container: HTMLElement, url: string) => {
         }
       }, 2000)
     } else {
-      error.value = '播放出错: ' + (e?.message || e || '未知错误')
+      error.value = '视频播放出错，可能是网络问题或视频格式不支持'
+      isH265EncodingError.value = true
       emit('error', e)
     }
   })
@@ -393,17 +780,25 @@ const initJessibucaPlayer = async (container: HTMLElement, url: string) => {
         }
       }, 2000)
     } else {
-      error.value = '播放超时，设备可能未推流或网络问题'
+      error.value = '播放超时，请检查网络连接或下载录像文件观看'
+      isH265EncodingError.value = true
       emit('error', new Error('timeout'))
     }
   })
   
   // 开始播放
+  console.log('[PlaybackPlayer] Starting playback with URL:', url)
   await player.play(url)
   playerInstance = player
   
-  // FLV 流通常是直播/实时，时长需要从外部获取
-  duration.value = props.videoDuration || 0
+  // 尝试获取时长（Jessibuca可能没有直接的时长API，使用props传入的）
+  if (props.videoDuration) {
+    duration.value = props.videoDuration
+  } else if (props.recordingInfo?.duration) {
+    duration.value = props.recordingInfo.duration
+  }
+  
+  console.log('[PlaybackPlayer] Jessibuca player initialized, duration:', duration.value)
 }
 
 /**
@@ -418,6 +813,13 @@ const cleanup = async () => {
         await playerInstance.destroy().catch(() => {})
       }
       playerInstance = null
+    }
+    
+    if (easyPlayerInstance) {
+      if (typeof easyPlayerInstance.destroy === 'function') {
+        easyPlayerInstance.destroy()
+      }
+      easyPlayerInstance = null
     }
     
     if (nativeVideoElement) {
@@ -438,12 +840,16 @@ const cleanup = async () => {
   isPlaying.value = false
   isPaused.value = false
   currentProgress.value = 0
+  detectedH265.value = false
 }
 
 /**
  * 重试播放
  */
 const retry = () => {
+  error.value = ''
+  isH265EncodingError.value = false
+  detectedH265.value = false
   initPlayer()
 }
 
@@ -456,6 +862,14 @@ const togglePause = () => {
       nativeVideoElement.play()
     } else {
       nativeVideoElement.pause()
+    }
+  } else if (easyPlayerInstance) {
+    if (isPaused.value) {
+      // EasyPlayer 没有 resume，需要重新 play
+      const url = effectivePlayUrl.value
+      easyPlayerInstance.playback(url).catch(() => {})
+    } else {
+      easyPlayerInstance.pause()
     }
   } else if (playerInstance) {
     if (isPaused.value) {
@@ -472,6 +886,9 @@ const togglePause = () => {
 const onSeek = (value: number) => {
   if (nativeVideoElement) {
     nativeVideoElement.currentTime = value
+  } else if (easyPlayerInstance) {
+    // EasyPlayer 使用 seekTime 方法（单位：秒）
+    easyPlayerInstance.seekTime(value)
   }
   // Jessibuca 暂不支持 seek
 }
@@ -486,6 +903,8 @@ const onSeeking = (value: number) => {
 const seekBackward = () => {
   if (nativeVideoElement) {
     nativeVideoElement.currentTime = Math.max(0, nativeVideoElement.currentTime - 10)
+  } else if (easyPlayerInstance) {
+    easyPlayerInstance.seekTime(Math.max(0, currentProgress.value - 10))
   }
 }
 
@@ -495,6 +914,8 @@ const seekBackward = () => {
 const seekForward = () => {
   if (nativeVideoElement) {
     nativeVideoElement.currentTime = Math.min(duration.value, nativeVideoElement.currentTime + 10)
+  } else if (easyPlayerInstance) {
+    easyPlayerInstance.seekTime(Math.min(duration.value, currentProgress.value + 10))
   }
 }
 
@@ -505,6 +926,9 @@ const changeSpeed = (speed: number) => {
   playbackSpeed.value = speed
   if (nativeVideoElement) {
     nativeVideoElement.playbackRate = speed
+  } else if (easyPlayerInstance) {
+    // EasyPlayer 使用 setRate 方法
+    easyPlayerInstance.setRate(speed)
   }
 }
 
@@ -515,6 +939,8 @@ const toggleMute = () => {
   isMuted.value = !isMuted.value
   if (nativeVideoElement) {
     nativeVideoElement.muted = isMuted.value
+  } else if (easyPlayerInstance) {
+    easyPlayerInstance.setMute(isMuted.value)
   } else if (playerInstance) {
     if (isMuted.value) {
       playerInstance.mute()
@@ -530,6 +956,16 @@ const toggleMute = () => {
 const onVolumeChange = (val: number) => {
   if (nativeVideoElement) {
     nativeVideoElement.volume = val / 100
+  } else if (easyPlayerInstance) {
+    // EasyPlayer 音量控制 (0-1)
+    // 暂无直接的 setVolume API，通过 setMute 控制
+    if (val === 0) {
+      easyPlayerInstance.setMute(true)
+      isMuted.value = true
+    } else if (isMuted.value) {
+      easyPlayerInstance.setMute(false)
+      isMuted.value = false
+    }
   } else if (playerInstance) {
     playerInstance.setVolume(val / 100)
   }
@@ -563,6 +999,26 @@ const toggleFullscreen = async () => {
   } catch (e) {
     console.warn('[PlaybackPlayer] Fullscreen toggle failed:', e)
   }
+}
+
+/**
+ * 下载视频（用于错误提示中的下载按钮）
+ */
+const downloadVideo = () => {
+  const url = downloadUrl.value
+  if (!url) {
+    ElMessage.warning('无可用的下载地址')
+    return
+  }
+  
+  const a = document.createElement('a')
+  a.href = url
+  a.download = props.recordingInfo?.fileName || 'recording.mp4'
+  a.target = '_blank'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  ElMessage.success('开始下载视频')
 }
 
 /**
@@ -695,10 +1151,27 @@ defineExpose({
   transform: translate(-50%, -50%);
   text-align: center;
   color: #909399;
+  max-width: 500px;
+  padding: 20px;
 }
 
 .video-error p {
   margin: 10px 0;
+  font-size: 14px;
+}
+
+.error-hint {
+  color: #e6a23c;
+  font-size: 13px;
+  line-height: 1.6;
+  margin-top: 15px;
+}
+
+.error-actions {
+  margin-top: 20px;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
 }
 
 /* 回放控制栏 */

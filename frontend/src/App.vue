@@ -123,6 +123,7 @@ import {
   FolderOpened, User, ArrowDown, UserFilled, Key 
 } from '@element-plus/icons-vue'
 import axios from 'axios'
+import { getUserInfo, clearAuth } from './lib/auth'
 
 interface UserInfo {
   id: string
@@ -213,10 +214,7 @@ const handleLogout = async () => {
     }
     
     // 清除认证信息
-    localStorage.removeItem('auth_token')
-    localStorage.removeItem('user_info')
-    sessionStorage.removeItem('auth_token')
-    sessionStorage.removeItem('user_info')
+    clearAuth()
     
     ElMessage.success('已退出登录')
     router.push('/login')
@@ -255,12 +253,7 @@ const handleChangePassword = async () => {
 }
 
 const loadUserInfo = () => {
-  const userInfoStr = localStorage.getItem('user_info') || sessionStorage.getItem('user_info')
-  try {
-    currentUser.value = userInfoStr ? JSON.parse(userInfoStr) : null
-  } catch (e) {
-    currentUser.value = null
-  }
+  currentUser.value = getUserInfo()
 }
 
 // 根据当前路由更新激活菜单

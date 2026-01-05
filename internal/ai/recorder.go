@@ -72,7 +72,9 @@ type RecorderConfig struct {
 	RecordDelay    time.Duration  `yaml:"RecordDelay"`    // 录像延迟(秒)
 	MinRecordTime  time.Duration  `yaml:"MinRecordTime"`  // 最小录像时长(秒)
 	DetectorConfig DetectorConfig `yaml:"DetectorConfig"`
-	FFmpegBin      string         `yaml:"FFmpegBin"` // FFmpeg路径
+	DetectorType   DetectorType   `yaml:"DetectorType"` // 检测器类型
+	APIEndpoint    string         `yaml:"APIEndpoint"`  // HTTP API 端点
+	FFmpegBin      string         `yaml:"FFmpegBin"`    // FFmpeg路径
 }
 
 // DefaultRecorderConfig 默认录像器配置
@@ -89,8 +91,17 @@ func DefaultRecorderConfig(channelID string) RecorderConfig {
 
 // NewStreamRecorder 创建流录像控制器
 func NewStreamRecorder(config RecorderConfig, recordControl RecordControlFunc) (*StreamRecorder, error) {
-	// 创建检测器池（使用单个检测器以节省资源）
-	pool, err := NewDetectorPool(config.DetectorConfig, 1)
+	// 创建检测器池，使用配置的检测器类型
+	factoryConfig := DetectorFactoryConfig{
+		Type:        config.DetectorType,
+		Config:      config.DetectorConfig,
+		APIEndpoint: config.APIEndpoint,
+	}
+	if factoryConfig.Type == "" {
+		factoryConfig.Type = DetectorTypeAuto
+	}
+
+	pool, err := NewDetectorPoolWithFactory(factoryConfig, 1)
 	if err != nil {
 		return nil, fmt.Errorf("创建检测器池失败: %w", err)
 	}

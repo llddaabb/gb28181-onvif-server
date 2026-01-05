@@ -93,6 +93,20 @@
               </template>
             </el-table-column>
           </el-table>
+          
+          <!-- 设备录像分页 -->
+          <div v-if="deviceRecordingTotal > 0" style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center;">
+            <span style="color: #909399; font-size: 14px;">共 {{ deviceRecordingTotal }} 条记录</span>
+            <el-pagination
+              v-model:current-page="deviceRecordingPage"
+              v-model:page-size="deviceRecordingPageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="deviceRecordingTotal"
+              layout="sizes, prev, pager, next, jumper"
+              @size-change="handleDeviceRecordingPageSizeChange"
+              @current-change="handleDeviceRecordingPageChange"
+            />
+          </div>
         </el-tab-pane>
 
         <!-- ZLM录像列表 -->
@@ -161,6 +175,20 @@
               </template>
             </el-table-column>
           </el-table>
+          
+          <!-- ZLM录像分页 -->
+          <div style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center;">
+            <span style="color: #909399; font-size: 14px;">共 {{ zlmQueryTotal }} 条记录</span>
+            <el-pagination
+              v-model:current-page="zlmQueryPage"
+              v-model:page-size="zlmQueryPageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="zlmQueryTotal"
+              layout="sizes, prev, pager, next, jumper"
+              @size-change="handleZLMPageSizeChange"
+              @current-change="handleZLMPageChange"
+            />
+          </div>
         </el-tab-pane>
 
         <!-- AI智能录像 -->
@@ -282,6 +310,93 @@
             </el-table-column>
           </el-table>
 
+          <!-- AI录像历史查询 -->
+          <el-card style="margin-top: 20px;">
+            <template #header>
+              <div class="card-header">
+                <span>AI录像历史查询</span>
+              </div>
+            </template>
+            <el-form :inline="true">
+              <el-form-item label="选择通道">
+                <el-select v-model="aiQueryChannelId" placeholder="请选择通道" style="width: 200px;" @change="onAIChannelChange">
+                  <el-option 
+                    v-for="channel in channels" 
+                    :key="channel.channelId" 
+                    :label="channel.channelName || channel.channelId" 
+                    :value="channel.channelId"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="查询日期">
+                <el-date-picker
+                  v-model="aiQueryDate"
+                  type="date"
+                  placeholder="选择日期"
+                  format="YYYY-MM-DD"
+                  value-format="YYYY-MM-DD"
+                  :disabled-date="(date: Date) => date > new Date()"
+                  style="width: 180px;"
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" @click="queryAIRecordings" :loading="aiQueryLoading">
+                  <el-icon><Search /></el-icon> 查询录像
+                </el-button>
+                <el-button @click="clearAIQuery">
+                  <el-icon><Delete /></el-icon> 清空
+                </el-button>
+              </el-form-item>
+            </el-form>
+
+            <!-- AI录像列表 -->
+            <el-table :data="aiHistoryRecordings" v-loading="aiQueryLoading" style="width: 100%; margin-top: 10px;">
+              <el-table-column prop="fileName" label="文件名" min-width="180" />
+              <el-table-column prop="startTime" label="开始时间" width="160" />
+              <el-table-column prop="endTime" label="结束时间" width="160">
+                <template #default="scope">
+                  {{ scope.row.status === 'recording' ? '录制中' : scope.row.endTime }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="fileSize" label="文件大小" width="120" />
+              <el-table-column label="状态" width="100">
+                <template #default="scope">
+                  <el-tag :type="scope.row.status === 'recording' ? 'danger' : 'success'">
+                    {{ scope.row.status === 'recording' ? '录制中' : '已完成' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="200" fixed="right">
+                <template #default="scope">
+                  <el-button type="primary" size="small" @click="playAIRecording(scope.row)">
+                    <el-icon><VideoPlay /></el-icon> 播放
+                  </el-button>
+                  <el-button type="success" size="small" @click="downloadAIRecording(scope.row)">
+                    <el-icon><Download /></el-icon> 下载
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            
+            <!-- 分页组件 -->
+            <div style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center;">
+              <span style="color: #909399; font-size: 14px;">共 {{ aiQueryTotal }} 条记录</span>
+              <el-pagination
+                v-model:current-page="aiQueryPage"
+                v-model:page-size="aiQueryPageSize"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="aiQueryTotal"
+                layout="sizes, prev, pager, next, jumper"
+                @size-change="handleAIPageSizeChange"
+                @current-change="handleAIPageChange"
+              />
+            </div>
+            
+            <div v-if="aiHistoryRecordings.length === 0 && !aiQueryLoading" style="text-align: center; padding: 20px; color: #909399;">
+              {{ aiQueryChannelId ? '未查询到录像' : '请选择通道并查询' }}
+            </div>
+          </el-card>
+
           <!-- AI配置面板 -->
           <el-card style="margin-top: 20px;">
             <template #header>
@@ -352,6 +467,8 @@
           :recording-info="currentPlayback"
           :default-height="480"
           :autoplay="true"
+          :force-h265="currentPlayback.isH265"
+          :codec="currentPlayback.codec"
           @playing="onPlaybackPlaying"
           @ended="onPlaybackEnded"
           @error="onPlaybackError"
@@ -414,7 +531,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
-import { Refresh, VideoPlay, VideoPause, Download, CopyDocument } from '@element-plus/icons-vue'
+import { Refresh, VideoPlay, VideoPause, Download, CopyDocument, Search, Delete } from '@element-plus/icons-vue'
 import PlaybackPlayer from '../components/PlaybackPlayer.vue'
 
 interface Recording {
@@ -470,10 +587,15 @@ const selectedDevice = ref('')
 const selectedChannel = ref('')
 const queryDate = ref(new Date())
 const recordings = ref<Recording[]>([])
+const allRecordings = ref<Recording[]>([]) // 保存全部录像用于前端分页
 const selectedRecording = ref<Recording | null>(null)
 const playbackDialogVisible = ref(false)
 const playbackProgress = ref(0)
 const playbackDuration = ref(0)
+// 设备录像分页
+const deviceRecordingPage = ref(1)
+const deviceRecordingPageSize = ref(20)
+const deviceRecordingTotal = ref(0)
 
 const gb28181Devices = ref<Device[]>([])
 const onvifDevices = ref<Device[]>([])
@@ -488,6 +610,11 @@ const zlmQueryDate = ref(new Date())
 const zlmRecordingDates = ref<string[]>([]) // 有录像的日期列表
 const zlmCalendarYear = ref(new Date().getFullYear())
 const zlmCalendarMonth = ref(new Date().getMonth() + 1)
+// ZLM录像分页
+const zlmQueryPage = ref(1)
+const zlmQueryPageSize = ref(20)
+const zlmQueryTotal = ref(0)
+const zlmQueryTotalPages = ref(1)
 const currentPlayback = ref({
   fileName: '',
   app: '',
@@ -499,7 +626,10 @@ const currentPlayback = ref({
   flvUrl: '',
   mp4Url: '',
   downloadUrl: '',
+  codec: '',
+  isH265: false,
   streamKey: '',
+  hwAccel: 'none',  // 硬件加速类型
   gb28181StreamId: '', // GB28181 回放流 ID
   note: ''
 })
@@ -520,6 +650,18 @@ const aiRecordingForm = ref({
   channelId: '',
   mode: 'person'
 })
+
+// AI录像历史查询
+const aiQueryChannelId = ref('')
+const aiQueryDate = ref(new Date().toISOString().split('T')[0])
+const aiQueryLoading = ref(false)
+const aiHistoryRecordings = ref<any[]>([])
+// AI录像分页
+const aiQueryPage = ref(1)
+const aiQueryPageSize = ref(20)
+const aiQueryTotal = ref(0)
+const aiQueryTotalPages = ref(1)
+
 const aiConfig = ref({
   confidence: 0.5,
   iouThreshold: 0.45,
@@ -645,7 +787,7 @@ const queryRecordings = async () => {
           if (resultResponse.data.success && resultResponse.data.count > 0) {
             // 获取到结果，转换格式
             const deviceRecords = resultResponse.data.records || []
-            recordings.value = deviceRecords.map((rec: any, index: number) => ({
+            allRecordings.value = deviceRecords.map((rec: any, index: number) => ({
               recordingId: `gb28181_${selectedChannel.value}_${index}`,
               channelId: rec.channelId,
               channelName: rec.name || selectedChannel.value,
@@ -658,7 +800,12 @@ const queryRecordings = async () => {
               filePath: rec.filePath
             }))
             
-            ElMessage.success(`查询到 ${recordings.value.length} 条录像`)
+            // 设置分页信息并显示第一页
+            deviceRecordingTotal.value = allRecordings.value.length
+            deviceRecordingPage.value = 1
+            updateDeviceRecordingsPage()
+            
+            ElMessage.success(`查询到 ${allRecordings.value.length} 条录像`)
             deviceRecordingLoading.value = false
           } else if (attempts < maxAttempts) {
             // 继续轮询
@@ -691,7 +838,7 @@ const queryRecordings = async () => {
       
       if (response.data.success) {
         const onvifRecords = response.data.recordings || []
-        recordings.value = onvifRecords.map((rec: any, index: number) => ({
+        allRecordings.value = onvifRecords.map((rec: any, index: number) => ({
           recordingId: rec.recordingToken || `onvif_${selectedDevice.value}_${index}`,
           channelId: selectedDevice.value,
           channelName: rec.name || selectedDevice.value,
@@ -703,7 +850,12 @@ const queryRecordings = async () => {
           recordingToken: rec.recordingToken
         }))
         
-        ElMessage.success(`查询到 ${recordings.value.length} 条录像`)
+        // 设置分页信息并显示第一页
+        deviceRecordingTotal.value = allRecordings.value.length
+        deviceRecordingPage.value = 1
+        updateDeviceRecordingsPage()
+        
+        ElMessage.success(`查询到 ${allRecordings.value.length} 条录像`)
       } else {
         ElMessage.warning('未查询到录像')
       }
@@ -743,6 +895,24 @@ const calculateDuration = (startTime: string, endTime: string): string => {
   }
 }
 
+// 设备录像分页处理
+const updateDeviceRecordingsPage = () => {
+  const start = (deviceRecordingPage.value - 1) * deviceRecordingPageSize.value
+  const end = start + deviceRecordingPageSize.value
+  recordings.value = allRecordings.value.slice(start, end)
+}
+
+const handleDeviceRecordingPageSizeChange = (newSize: number) => {
+  deviceRecordingPageSize.value = newSize
+  deviceRecordingPage.value = 1
+  updateDeviceRecordingsPage()
+}
+
+const handleDeviceRecordingPageChange = (newPage: number) => {
+  deviceRecordingPage.value = newPage
+  updateDeviceRecordingsPage()
+}
+
 // 格式化文件大小
 const formatFileSize = (bytes: number): string => {
   if (bytes < 1024) return bytes + ' B'
@@ -766,6 +936,8 @@ const playbackRecording = async (recording: Recording) => {
     flvUrl: '',
     mp4Url: '',
     downloadUrl: '',
+    codec: '',
+    isH265: false,
     streamKey: '',
     gb28181StreamId: '',
     note: ''
@@ -875,10 +1047,15 @@ const formatTime = (seconds: number) => {
 }
 
 // ZLM录像功能
-const queryZLMRecordings = async () => {
+const queryZLMRecordings = async (resetPage = true) => {
   if (!zlmSelectedChannel.value) {
     ElMessage.warning('请选择通道')
     return
+  }
+
+  // 如果需要重置页码
+  if (resetPage) {
+    zlmQueryPage.value = 1
   }
 
   zlmLoading.value = true
@@ -891,13 +1068,17 @@ const queryZLMRecordings = async () => {
       params: {
         channelId: zlmSelectedChannel.value,
         date: dateStr,
-        app: 'live'
+        app: 'live',
+        page: zlmQueryPage.value,
+        page_size: zlmQueryPageSize.value
       }
     })
     
     if (response.data.success) {
       zlmRecordings.value = response.data.recordings || []
       zlmRecordPath.value = response.data.recordPath || ''
+      zlmQueryTotal.value = response.data.total || 0
+      zlmQueryTotalPages.value = response.data.totalPages || 1
       ElMessage.success(`查询到 ${response.data.total} 个录像片段`)
     } else {
       ElMessage.error('查询录像失败')
@@ -910,11 +1091,26 @@ const queryZLMRecordings = async () => {
   }
 }
 
+// ZLM分页处理函数
+const handleZLMPageSizeChange = (newSize: number) => {
+  zlmQueryPageSize.value = newSize
+  zlmQueryPage.value = 1
+  queryZLMRecordings(false)
+}
+
+const handleZLMPageChange = (newPage: number) => {
+  zlmQueryPage.value = newPage
+  queryZLMRecordings(false)
+}
+
 const clearZLMQuery = () => {
   zlmSelectedChannel.value = ''
   zlmQueryDate.value = new Date()
   zlmRecordings.value = []
   zlmRecordingDates.value = []
+  zlmQueryPage.value = 1
+  zlmQueryTotal.value = 0
+  zlmQueryTotalPages.value = 1
 }
 
 // 获取通道有录像的日期列表
@@ -945,8 +1141,9 @@ const fetchRecordingDates = async (year?: number, month?: number) => {
   }
 }
 
-// 通道选择变化时获取录像日期
+// 通道选择变化时获取录像日期并重置分页
 const onZlmChannelChange = () => {
+  zlmQueryPage.value = 1
   fetchRecordingDates()
 }
 
@@ -985,8 +1182,10 @@ const disabledDate = (_date: Date) => {
 
 const playZLMRecording = async (recording: any) => {
   try {
+    // 使用新的流式播放接口
     const response = await axios.get(
-      `/api/recording/zlm/play/${recording.app}/${recording.stream}/${recording.fileName}`
+      `/api/recording/zlm/stream/${recording.app}/${recording.stream}/${recording.fileName}`,
+      { timeout: 30000 }  // 30秒超时
     )
     
     if (response.data.success) {
@@ -997,15 +1196,23 @@ const playZLMRecording = async (recording: any) => {
         size: recording.fileSize,
         fileSize: response.data.fileSize || recording.fileSize,
         modTime: recording.modTime,
-        playUrl: response.data.playUrl || response.data.mp4Url,
+        playUrl: response.data.flvUrl || response.data.playUrl,  // FLV 播放地址
         flvUrl: response.data.flvUrl || '',
         mp4Url: response.data.mp4Url || '',
         downloadUrl: response.data.downloadUrl || response.data.mp4Url,
-        streamKey: response.data.streamKey || '',
+        codec: response.data.codec || '',
+        isH265: !!(response.data.isH265 || (response.data.codec && ['hevc', 'h265'].includes(response.data.codec.toLowerCase()))),
+        streamKey: response.data.streamId || '',  // 保存 streamId 用于停止
+        hwAccel: response.data.hwAccel || 'none',  // 硬件加速信息
         note: response.data.note || ''
       }
       selectedRecording.value = null
       playbackDialogVisible.value = true
+      
+      // 显示硬件加速状态
+      if (response.data.hwAccel && response.data.hwAccel !== 'none') {
+        ElMessage.success(`使用 ${response.data.hwAccel.toUpperCase()} 硬件加速推流`)
+      }
     } else {
       ElMessage.error('获取播放地址失败')
     }
@@ -1017,14 +1224,14 @@ const playZLMRecording = async (recording: any) => {
 
 // 关闭回放对话框时清理资源
 const onPlaybackDialogClose = async () => {
-  // 如果有 ZLM 流代理，停止它
+  // 如果有 ffmpeg 推流会话，停止它
   if (currentPlayback.value.streamKey) {
     try {
-      await axios.post('/api/recording/zlm/stop', null, {
-        params: { key: currentPlayback.value.streamKey }
+      await axios.post('/api/recording/zlm/stream/stop', null, {
+        params: { streamId: currentPlayback.value.streamKey }
       })
     } catch (error) {
-      console.warn('停止回放流失败:', error)
+      console.warn('停止推流失败:', error)
     }
   }
   
@@ -1052,6 +1259,8 @@ const onPlaybackDialogClose = async () => {
     flvUrl: '',
     mp4Url: '',
     downloadUrl: '',
+    codec: '',
+    isH265: false,
     streamKey: '',
     gb28181StreamId: '',
     note: ''
@@ -1074,31 +1283,36 @@ const onPlaybackError = (error: any) => {
 
 const downloadZLMRecording = async (recording: any) => {
   try {
-    const response = await axios.get(
-      `/api/recording/zlm/play/${recording.app}/${recording.stream}/${recording.fileName}`
-    )
-    
-    if (response.data.success) {
-      const downloadUrl = response.data.playUrl || response.data.mp4Url
-      downloadFile(downloadUrl, recording.fileName)
-    } else {
-      ElMessage.error('获取下载地址失败')
-    }
+    // 直接使用文件下载接口
+    const downloadUrl = `/api/recording/zlm/file/${recording.app}/${recording.stream}/${recording.fileName}`
+    downloadFile(downloadUrl, recording.fileName)
   } catch (error) {
     ElMessage.error('下载失败')
     console.error('下载失败:', error)
   }
 }
 
-const downloadFile = (url: string, fileName: string) => {
-  const link = document.createElement('a')
-  link.href = url
-  link.download = fileName
-  link.target = '_blank'
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  ElMessage.success('开始下载')
+const downloadFile = async (url: string, fileName: string) => {
+  try {
+    ElMessage.info('正在准备下载...')
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error('下载失败')
+    }
+    const blob = await response.blob()
+    const blobUrl = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = fileName
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(blobUrl)
+    ElMessage.success('下载完成')
+  } catch (error) {
+    ElMessage.error('下载失败')
+    console.error('下载失败:', error)
+  }
 }
 
 const copyToClipboard = async (text: string) => {
@@ -1117,8 +1331,11 @@ const fetchAIDetectorInfo = async () => {
     if (response.data.success) {
       aiDetectorInfo.value = response.data.info || { available: false }
     }
-  } catch (error) {
-    console.error('获取AI检测器信息失败:', error)
+  } catch (error: any) {
+    // AI 服务不可用时静默处理
+    if (error.response?.status !== 503) {
+      console.error('获取AI检测器信息失败:', error)
+    }
     aiDetectorInfo.value = { available: false, name: '', backend: '', inputSize: 0, confidence: 0, iouThreshold: 0 }
   }
 }
@@ -1137,8 +1354,11 @@ const fetchAIConfig = async () => {
         autoStart: cfg.AutoStart || false
       }
     }
-  } catch (error) {
-    console.error('获取AI配置失败:', error)
+  } catch (error: any) {
+    // AI 服务不可用时静默处理
+    if (error.response?.status !== 503) {
+      console.error('获取AI配置失败:', error)
+    }
   }
 }
 
@@ -1192,8 +1412,11 @@ const refreshAIStatus = async () => {
         recordTime: formatDuration(totalRecordTime)
       }
     }
-  } catch (error) {
-    console.error('获取AI录像状态失败:', error)
+  } catch (error: any) {
+    // 如果是 503 错误（AI 服务不可用），静默处理，不打印错误
+    if (error.response?.status !== 503) {
+      console.error('获取AI录像状态失败:', error)
+    }
   }
 }
 
@@ -1240,6 +1463,128 @@ const stopAIRecording = async (channelId: string) => {
   } catch (error: any) {
     ElMessage.error(error.response?.data?.error || '停止AI录像失败')
     console.error('停止AI录像失败:', error)
+  }
+}
+
+// AI录像历史查询
+const queryAIRecordings = async (resetPage = true) => {
+  if (!aiQueryChannelId.value) {
+    ElMessage.warning('请选择通道')
+    return
+  }
+
+  // 如果需要重置页码
+  if (resetPage) {
+    aiQueryPage.value = 1
+  }
+
+  aiQueryLoading.value = true
+  try {
+    const response = await axios.get('/api/ai/recording/list', {
+      params: {
+        channel_id: aiQueryChannelId.value,
+        date: aiQueryDate.value,
+        page: aiQueryPage.value,
+        page_size: aiQueryPageSize.value
+      }
+    })
+    
+    if (response.data.success) {
+      aiHistoryRecordings.value = response.data.recordings || []
+      aiQueryTotal.value = response.data.total || 0
+      aiQueryTotalPages.value = response.data.totalPages || 1
+      ElMessage.success(`查询到 ${response.data.total} 个AI录像片段`)
+    } else {
+      ElMessage.error('查询AI录像失败')
+    }
+  } catch (error) {
+    ElMessage.error('查询AI录像失败')
+    console.error('查询AI录像失败:', error)
+  } finally {
+    aiQueryLoading.value = false
+  }
+}
+
+const clearAIQuery = () => {
+  aiQueryChannelId.value = ''
+  aiQueryDate.value = new Date().toISOString().split('T')[0]
+  aiHistoryRecordings.value = []
+  aiQueryPage.value = 1
+  aiQueryTotal.value = 0
+  aiQueryTotalPages.value = 1
+}
+
+// 分页处理函数
+const handleAIPageSizeChange = (newSize: number) => {
+  aiQueryPageSize.value = newSize
+  aiQueryPage.value = 1
+  queryAIRecordings(false)
+}
+
+const handleAIPageChange = (newPage: number) => {
+  aiQueryPage.value = newPage
+  queryAIRecordings(false)
+}
+
+const onAIChannelChange = () => {
+  // 通道变化时自动查询（重置页码）
+  if (aiQueryChannelId.value) {
+    queryAIRecordings(true)
+  }
+}
+
+const playAIRecording = async (recording: any) => {
+  try {
+    // 使用新的流式播放接口
+    // 路径格式: /api/recording/zlm/stream/{app}/{stream}/{date}/{fileName}
+    const filePath = recording.date ? `${recording.date}/${recording.fileName}` : recording.fileName
+    const response = await axios.get(`/api/recording/zlm/stream/${recording.app}/${recording.stream}/${filePath}`, {
+      timeout: 30000  // 30秒超时
+    })
+    
+    if (response.data.success) {
+      currentPlayback.value = {
+        fileName: recording.fileName,
+        app: recording.app,
+        stream: recording.stream,
+        size: recording.size.toString(),
+        fileSize: recording.fileSize,
+        modTime: recording.modTime,
+        playUrl: response.data.flvUrl || response.data.playUrl,  // FLV 播放地址
+        flvUrl: response.data.flvUrl || '',
+        mp4Url: response.data.mp4Url || '',
+        downloadUrl: response.data.downloadUrl || '',
+        codec: response.data.codec || '',
+        isH265: !!(response.data.isH265 || (response.data.codec && ['hevc', 'h265'].includes(response.data.codec.toLowerCase()))),
+        streamKey: response.data.streamId || '',  // 保存 streamId 用于停止
+        hwAccel: response.data.hwAccel || 'none',
+        gb28181StreamId: '',
+        note: response.data.note || ''
+      }
+      playbackDialogVisible.value = true
+      
+      // 显示硬件加速状态
+      if (response.data.hwAccel && response.data.hwAccel !== 'none') {
+        ElMessage.success(`使用 ${response.data.hwAccel.toUpperCase()} 硬件加速推流`)
+      }
+    } else {
+      ElMessage.error('获取播放地址失败')
+    }
+  } catch (error) {
+    ElMessage.error('播放AI录像失败')
+    console.error('播放AI录像失败:', error)
+  }
+}
+
+const downloadAIRecording = async (recording: any) => {
+  try {
+    // 直接使用文件下载接口
+    const filePath = recording.date ? `${recording.date}/${recording.fileName}` : recording.fileName
+    const downloadUrl = `/api/recording/zlm/file/${recording.app}/${recording.stream}/${filePath}`
+    await downloadFile(downloadUrl, recording.fileName)
+  } catch (error) {
+    ElMessage.error('下载失败')
+    console.error('下载AI录像失败:', error)
   }
 }
 

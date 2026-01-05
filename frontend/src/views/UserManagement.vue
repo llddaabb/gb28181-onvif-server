@@ -86,6 +86,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import axios from 'axios'
+import { getUserInfo } from '../lib/auth'
 
 interface User {
   id: string
@@ -151,12 +152,7 @@ const formatDate = (dateStr: string) => {
 }
 
 const loadCurrentUser = () => {
-  const userInfoStr = localStorage.getItem('user_info') || sessionStorage.getItem('user_info')
-  try {
-    currentUser.value = userInfoStr ? JSON.parse(userInfoStr) : null
-  } catch (e) {
-    currentUser.value = null
-  }
+  currentUser.value = getUserInfo()
 }
 
 const loadUsers = async () => {

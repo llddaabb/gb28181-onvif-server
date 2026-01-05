@@ -1,2 +1,2 @@
-1e6a8964ccef587262d03979941a8434e4852657 修复WebRtcSession对象可能泄露的bug (#4596)
-Build Date: 2025年 12月 22日 星期一 10:35:13 CST
+1191f15132df8e49e986225f941d9f1432f3931a fix: windows下通过mingw编译报错 (#4617)
+Build Date: 2026年 01月 05日 星期一 16:16:00 CST

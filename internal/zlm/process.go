@@ -106,6 +106,15 @@ func NewProcessManager(config *ProcessConfig) *ProcessManager {
 }
 
 // SetConfigContent 设置 ZLM 配置文件内容 (由 config.yaml 生成的 INI 格式)
+//
+// 参数 content 应为由 Config.ZLM.GenerateConfigINI() 生成的 INI 格式文本。
+// 在 Start() 启动 ZLM 进程时，此内容会被写入临时配置文件，供 ZLM 进程读取。
+//
+// 使用示例：
+//
+//	zlmProcess := NewProcessManager(config)
+//	zlmProcess.SetConfigContent(cfg.ZLM.GenerateConfigINI())  // 从 config.yaml 生成
+//	zlmProcess.Start()  // 启动时自动应用此配置
 func (pm *ProcessManager) SetConfigContent(content string) {
 	pm.configContent = content
 }
@@ -224,7 +233,11 @@ func (pm *ProcessManager) findExecutable() (string, error) {
 		} else {
 			binPath := pm.embeddedZLM.GetBinPath()
 			if binPath != "" {
-				// 如果有从 config.yaml 生成的配置内容，写入配置文件
+				// 【配置生成】从 config.yaml 生成并应用 ZLM 配置
+				// 此步骤实现了单一配置源原则：
+				// - configContent 由 Config.ZLM.GenerateConfigINI() 生成
+				// - 将其写入 ZLM 进程可读的配置文件
+				// - 确保 ZLM 配置与 config.yaml 始终同步
 				if pm.configContent != "" {
 					configPath := filepath.Join(pm.embeddedZLM.GetWorkDir(), "conf", "config.ini")
 					if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -232,7 +245,7 @@ func (pm *ProcessManager) findExecutable() (string, error) {
 					} else if err := os.WriteFile(configPath, []byte(pm.configContent), 0644); err != nil {
 						log.Printf("[ZLM] 写入配置文件失败: %v", err)
 					} else {
-						log.Printf("[ZLM] 配置文件已从 config.yaml 生成")
+						log.Printf("[ZLM] ✓ 配置已从 config.yaml 自动生成并应用")
 					}
 				}
 				// 更新配置使用嵌入式路径

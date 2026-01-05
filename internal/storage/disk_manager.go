@@ -197,6 +197,13 @@ func (dm *DiskManager) monitorLoop() {
 func (dm *DiskManager) scanDisks() error {
 	// 如果已有配置的磁盘，更新它们的状态
 	if len(dm.disks) > 0 {
+		// 修正默认磁盘的挂载点为当前录像根目录
+		if disk, exists := dm.disks["disk_default"]; exists {
+			if disk.MountPoint != dm.recordRootDir {
+				debug.Info("storage", "修正磁盘挂载点: %s -> %s", disk.MountPoint, dm.recordRootDir)
+				disk.MountPoint = dm.recordRootDir
+			}
+		}
 		return dm.updateDiskStatusNoLock()
 	}
 
@@ -228,9 +235,18 @@ func (dm *DiskManager) updateDiskStatus() error {
 // updateDiskStatusNoLock 更新所有磁盘状态（不加锁，内部使用）
 func (dm *DiskManager) updateDiskStatusNoLock() error {
 	for _, disk := range dm.disks {
+		// 先检查挂载点是否存在
+		if _, err := os.Stat(disk.MountPoint); os.IsNotExist(err) {
+			debug.Error("storage", "磁盘 %s 挂载点不存在: %s", disk.ID, disk.MountPoint)
+			disk.Status = DiskStatusOffline
+			disk.LastCheck = time.Now()
+			continue
+		}
+
 		if err := dm.updateDiskInfo(disk); err != nil {
 			debug.Error("storage", "更新磁盘 %s 状态失败: %v", disk.ID, err)
 			disk.Status = DiskStatusError
+			disk.LastCheck = time.Now()
 		}
 	}
 	return nil

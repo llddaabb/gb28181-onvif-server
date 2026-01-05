@@ -700,3 +700,115 @@ func (s *Server) handleStopGB28181Service(w http.ResponseWriter, r *http.Request
 	debug.Info("gb28181", "GB28181服务已停止")
 	respondSuccessMsg(w, "GB28181服务已停止")
 }
+
+// handleDiagnoseRTPPlayback 诊断 GB28181 RTP 录像回放
+func (s *Server) handleDiagnoseRTPPlayback(w http.ResponseWriter, r *http.Request) {
+	debug.Info("gb28181", "开始诊断 RTP 录像回放")
+
+	diagnosis := map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"checks":    make([]map[string]interface{}, 0),
+	}
+
+	// 检查 ZLM 服务
+	checks := diagnosis["checks"].([]map[string]interface{})
+
+	zlmClient := s.zlmServer.GetAPIClient()
+	if zlmClient == nil {
+		checks = append(checks, map[string]interface{}{
+			"name":   "ZLM API Client",
+			"status": "FAIL",
+			"reason": "ZLM API 客户端未初始化",
+		})
+	} else {
+		checks = append(checks, map[string]interface{}{
+			"name":   "ZLM API Client",
+			"status": "OK",
+			"info":   "ZLM API 客户端已连接",
+		})
+	}
+
+	// 检查 RTP 服务器配置
+	zlmHost := s.getZLMHost(r)
+	zlmHTTPPort, zlmRTMPPort, _ := s.getZLMPorts()
+
+	checks = append(checks, map[string]interface{}{
+		"name":   "ZLM Network Configuration",
+		"status": "OK",
+		"info": map[string]interface{}{
+			"http_port": zlmHTTPPort,
+			"rtmp_port": zlmRTMPPort,
+			"host":      zlmHost,
+		},
+	})
+
+	// 测试打开和关闭 RTP 服务器
+	testStreamID := fmt.Sprintf("diagnostic_%d", time.Now().Unix())
+	rtpInfo, err := zlmClient.OpenRtpServer(testStreamID, 0, 0)
+	if err != nil {
+		checks = append(checks, map[string]interface{}{
+			"name":   "RTP Server Open",
+			"status": "FAIL",
+			"reason": fmt.Sprintf("打开 RTP 服务器失败: %v", err),
+		})
+	} else {
+		checks = append(checks, map[string]interface{}{
+			"name":   "RTP Server Open",
+			"status": "OK",
+			"info": map[string]interface{}{
+				"allocated_port": rtpInfo.Port,
+				"stream_id":      rtpInfo.StreamID,
+			},
+		})
+
+		// 尝试列出 RTP 服务器
+		servers, err := zlmClient.ListRtpServer()
+		if err != nil {
+			checks = append(checks, map[string]interface{}{
+				"name":   "List RTP Servers",
+				"status": "WARN",
+				"reason": fmt.Sprintf("列出 RTP 服务器失败: %v", err),
+			})
+		} else {
+			checks = append(checks, map[string]interface{}{
+				"name":   "List RTP Servers",
+				"status": "OK",
+				"info": map[string]interface{}{
+					"server_count": len(servers),
+					"servers":      servers,
+				},
+			})
+		}
+
+		// 关闭测试 RTP 服务器
+		if err := zlmClient.CloseRtpServer(testStreamID); err != nil {
+			checks = append(checks, map[string]interface{}{
+				"name":   "RTP Server Close",
+				"status": "WARN",
+				"reason": fmt.Sprintf("关闭 RTP 服务器失败: %v", err),
+			})
+		} else {
+			checks = append(checks, map[string]interface{}{
+				"name":   "RTP Server Close",
+				"status": "OK",
+				"info":   "RTP 服务器已关闭",
+			})
+		}
+	}
+
+	// 诊断建议
+	recommendations := []string{
+		"✓ 确保 GB28181 设备已注册并在线",
+		"✓ 查询设备录像列表，确认有可用的录像文件",
+		"✓ 发送录像回放请求时，等待 3-5 秒让设备建立 RTP 连接",
+		"✓ 检查防火墙是否阻止 RTP 端口（10000 及以上范围）",
+		"✓ 验证设备网络设置，确保能连接到本服务器的 RTP 接收端口",
+		"✓ 如果仍无法播放，查看 ZLM 日志了解 RTP 接收情况",
+	}
+
+	diagnosis["checks"] = checks
+	diagnosis["recommendations"] = recommendations
+	diagnosis["rtp_port_range"] = "10000-35000"
+
+	respondRaw(w, http.StatusOK, diagnosis)
+}

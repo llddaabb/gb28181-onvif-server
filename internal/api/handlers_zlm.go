@@ -55,6 +55,45 @@ func (s *Server) handleZLMProcessStatus(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleZLMConfig 获取 ZLM 配置信息
+func (s *Server) handleZLMConfig(w http.ResponseWriter, r *http.Request) {
+	config := map[string]interface{}{
+		"http": map[string]interface{}{
+			"port": 8081,
+		},
+		"rtsp": map[string]interface{}{
+			"port": 8554,
+		},
+		"rtmp": map[string]interface{}{
+			"port": 1935,
+		},
+	}
+
+	// 如果配置文件中有端口信息，使用配置文件中的值
+	if s.config.ZLM != nil {
+		if s.config.ZLM.HTTP != nil && s.config.ZLM.HTTP.Port > 0 {
+			config["http"] = map[string]interface{}{
+				"port": s.config.ZLM.HTTP.Port,
+			}
+		}
+		if s.config.ZLM.RTSP != nil && s.config.ZLM.RTSP.Port > 0 {
+			config["rtsp"] = map[string]interface{}{
+				"port": s.config.ZLM.RTSP.Port,
+			}
+		}
+		if s.config.ZLM.RTMP != nil && s.config.ZLM.RTMP.Port > 0 {
+			config["rtmp"] = map[string]interface{}{
+				"port": s.config.ZLM.RTMP.Port,
+			}
+		}
+	}
+
+	respondRaw(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"config":  config,
+	})
+}
+
 // handleZLMProcessStart 启动 ZLM 进程
 func (s *Server) handleZLMProcessStart(w http.ResponseWriter, r *http.Request) {
 	if !s.checkZLMProcessAvailable(w) {

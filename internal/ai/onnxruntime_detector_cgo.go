@@ -202,6 +202,11 @@ func (d *ONNXRuntimeDetector) Detect(ctx context.Context, img image.Image) (*Det
 
 	startTime := time.Now()
 
+	// 检查缓冲区是否已初始化
+	if len(d.inputBuffer) == 0 {
+		return nil, fmt.Errorf("输入缓冲区未初始化")
+	}
+
 	// 预处理
 	scaleX, scaleY := d.preprocess(img)
 

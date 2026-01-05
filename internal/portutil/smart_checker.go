@@ -189,6 +189,44 @@ func (spc *SmartPortChecker) GetAllocatedPort(requestedPort int) int {
 	return -1
 }
 
+// WaitForPortsAvailable 等待所有分配的端口都可用
+// timeout: 最大等待时间
+// 返回是否在超时时间内所有端口都可用
+func (spc *SmartPortChecker) WaitForPortsAvailable(timeout time.Duration) bool {
+	startTime := time.Now()
+	checkInterval := 100 * time.Millisecond // 检查间隔
+
+	for time.Since(startTime) < timeout {
+		allAvailable := true
+
+		// 检查所有分配的端口
+		for _, alloc := range spc.allocations {
+			// 跳过未成功分配的端口
+			if !alloc.IsAvailable || alloc.AllocatedPort <= 0 {
+				continue
+			}
+
+			// 检查端口是否真的可用
+			infos := getProcessByPort(alloc.AllocatedPort)
+			if len(infos) > 0 {
+				allAvailable = false
+				break
+			}
+		}
+
+		if allAvailable {
+			log.Printf("[智能端口] ✓ 所有端口已释放，耗时: %v", time.Since(startTime))
+			return true
+		}
+
+		// 等待一段时间后再次检查
+		time.Sleep(checkInterval)
+	}
+
+	log.Printf("[智能端口] ⚠ 等待端口释放超时 (%v)", timeout)
+	return false
+}
+
 // IsPortAvailable 检查原始端口是否可用
 func (spc *SmartPortChecker) IsPortAvailable(port int) bool {
 	if alloc, exists := spc.allocations[port]; exists {

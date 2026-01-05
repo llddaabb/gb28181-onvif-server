@@ -1,0 +1,420 @@
+<template>
+  <div class="preview-player-root">
+    <div class="video-player-wrapper" v-loading="loading">
+      
+      <div id="play-container" ref="playerContainer" class="video-player-container"></div>
+      
+      <div v-if="error" class="video-error">
+        <el-icon size="48"><VideoCamera /></el-icon>
+        <p>{{ error }}</p>
+        <el-button type="primary" @click="retry">重试</el-button>
+      </div>
+
+      <div v-if="showPtz" class="ptz-controls">
+        <div class="ptz-row">
+          <el-button size="small" @click="ptz('up')">上</el-button>
+        </div>
+        <div class="ptz-row">
+          <el-button size="small" @click="ptz('left')">左</el-button>
+          <el-button size="small" type="primary" @click="ptz('stop')">停止</el-button>
+          <el-button size="small" @click="ptz('right')">右</el-button>
+        </div>
+        <div class="ptz-row">
+          <el-button size="small" @click="ptz('down')">下</el-button>
+        </div>
+        <div class="ptz-row ptz-zoom">
+          <el-button size="small" @click="ptz('zoomin')">放大</el-button>
+          <el-button size="small" @click="ptz('zoomout')">缩小</el-button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onUnmounted, nextTick } from 'vue'
+import { ElMessage } from 'element-plus'
+import { VideoCamera } from '@element-plus/icons-vue'
+
+// 假设 Device 和 Channel 接口已在别处定义或就是这样
+interface Device { deviceId: string }
+interface Channel { channelId: string }
+
+const props = defineProps({
+  show: { type: Boolean, required: false, default: false },
+  device: { type: Object as () => Device | null, required: false },
+  channels: { type: Array as () => Channel[], required: false, default: () => [] },
+  selectedChannelId: { type: [String, Number], required: false },
+  showPtz: { type: Boolean, default: false },
+  ptzDeviceId: { type: [String, Number], required: false },
+  ptzChannelId: { type: [String, Number], required: false },
+})
+
+const emit = defineEmits(['update:show', 'update:selectedChannelId', 'playing', 'error', 'loading'])
+
+const playerContainer = ref<HTMLElement | null>(null)
+const loading = ref(false)
+const error = ref('')
+
+const streamInfoRaw = ref<any>(null)
+let h265PlayerInstance: any = null // 保持名称 h265PlayerInstance，但实际是 Jessibuca 实例
+
+// --- 函数定义区 ---
+
+/**
+ * 清理并销毁播放器实例
+ */
+const cleanup = () => {
+  console.debug('[PreviewPlayer] cleanup called')
+  try {
+    if (h265PlayerInstance) {
+      // 优先使用 destroy，与 jessibuca 推荐的销毁方式保持一致
+      if (typeof h265PlayerInstance.destroy === 'function') {
+        // jessibuca 的 destroy 可能返回 Promise，这里不等待
+        h265PlayerInstance.destroy()
+      } else if (typeof h265PlayerInstance.release === 'function') {
+        h265PlayerInstance.release()
+      }
+      h265PlayerInstance = null
+    }
+    // 重置父容器高度，避免影响其他组件布局
+    const wrapperEl = playerContainer.value?.parentElement
+    if (wrapperEl) {
+      // 恢复样式文件中定义的初始高度，或根据实际布局需求重置
+      wrapperEl.style.height = '800px' 
+    }
+  } catch (e) {
+    console.warn('[PreviewPlayer] cleanup error', e)
+  }
+}
+
+onUnmounted(() => {
+  cleanup()
+})
+
+/**
+ * 将相对 URL 转换为绝对 URL
+ */
+function normalizeStreamUrl(url: string): string {
+  if (!url) return ''
+  // 如果 URL 已经是完整 URL (http, https, rtmp, rtsp)，直接返回
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('rtmp://') || url.startsWith('rtsp://')) {
+    return url
+  }
+  // 如果是相对路径 (以 / 开头)，转换为完整 URL
+  if (url.startsWith('/')) {
+    // 使用当前页面的协议和域名/端口来拼接
+    return `${window.location.protocol}//${window.location.host}${url}`
+  }
+  // 其他情况返回原值，但可能会失败
+  return url
+}
+
+/**
+ * 尝试获取视频分辨率并调整容器尺寸
+ */
+const adjustPlayerSize = () => {
+    if (!h265PlayerInstance) return
+
+    let videoWidth = 0
+    let videoHeight = 0
+
+    // 尝试获取视频的原始分辨率
+    if (h265PlayerInstance.getVideoWidth && h265PlayerInstance.getVideoHeight) {
+        videoWidth = h265PlayerInstance.getVideoWidth()
+        videoHeight = h265PlayerInstance.getVideoHeight()
+    } else if (h265PlayerInstance.videoWidth && h265PlayerInstance.videoHeight) {
+        // 有些版本可能直接是属性
+        videoWidth = h265PlayerInstance.videoWidth
+        videoHeight = h265PlayerInstance.videoHeight
+    } 
+
+    if (videoWidth > 0 && videoHeight > 0) {
+        console.debug(`[PreviewPlayer] Detected video resolution: ${videoWidth}x${videoHeight}`)
+        
+        // 目标：调整 video-player-wrapper 的高度
+        const wrapperEl = playerContainer.value?.parentElement
+        if (!wrapperEl) return
+
+        const aspectRatio = videoWidth / videoHeight
+        
+        // 固定宽度，根据比例计算高度
+        const containerWidth = wrapperEl.clientWidth
+        const calculatedHeight = containerWidth / aspectRatio
+
+        // 应用高度样式
+        wrapperEl.style.height = `${calculatedHeight}px`
+        wrapperEl.style.maxHeight = '100vh'; // 可选：限制最大高度
+
+        console.log(`[PreviewPlayer] Adjusted wrapper height to ${calculatedHeight}px`)
+    } else {
+         console.warn('[PreviewPlayer] Failed to get valid video dimensions, skipping size adjustment.')
+    }
+}
+
+
+/**
+ * 初始化和启动播放器
+ */
+const initPlayer = async () => {
+  cleanup()
+  loading.value = true
+  emit('loading', true) // 显式通知外部组件开始加载
+  error.value = ''
+
+  // 1. 获取并规范化流地址
+  const hlsUrl = streamInfoRaw.value?.hls_url || ''
+  const flvUrl = streamInfoRaw.value?.flv_url || ''
+  // 播放优先级：FLV (低延迟) > HLS
+  const playUrl = flvUrl || hlsUrl
+  const finalUrl = normalizeStreamUrl(playUrl)
+
+  console.debug('[PreviewPlayer] Normalized play URL:', finalUrl)
+  if (!finalUrl) {
+    error.value = '未获取到流地址'
+    loading.value = false
+    emit('loading', false)
+    emit('error', error.value)
+    return
+  }
+
+  // 2. 检查全局播放器对象
+  await nextTick()
+  const JB: any = (window as any).Jessibuca
+  if (!JB) {
+    error.value = 'Jessibuca 播放器库未找到，请检查是否已正确引入 jessibuca.js'
+    loading.value = false
+    emit('loading', false)
+    return
+  }
+
+  // 3. 检查 DOM 元素（ID 用于配置，ref 用于获取父元素）
+  const containerId = 'play-container'
+  const containerEl = document.getElementById(containerId)
+  if (!containerEl) {
+    error.value = '播放容器元素未找到'
+    loading.value = false
+    emit('loading', false)
+    return
+  }
+
+  try {
+    // jessibuca 配置，参考案例和最佳实践
+    const cfg = {
+      container: containerEl, // jessibuca 的推荐配置方式
+      id: containerId, // 也可以保留 ID
+      url: finalUrl,
+      isLive: true,
+      autoplay: true,
+      // autodestroy: false, // 默认或根据需要设置
+      videoBuffer: 0.2, // 缓存时长，从案例中借鉴
+      isResize: false,
+      useMSE: flvUrl ? true : false, // FLV 流通常使用 MSE
+      debug: false,
+      // 隐藏自带的操作按钮
+      operateBtns: {
+          fullscreen: false,
+          screenshot: false,
+          play: false,
+          audio: false,
+          recorder: false
+      },
+      // ... 其他配置，例如：showBandwidth: false
+    }
+
+    // 实例化播放器
+    h265PlayerInstance = new (JB as any)(cfg)
+    console.debug('[PreviewPlayer] Jessibuca instance created', h265PlayerInstance)
+
+    // 绑定事件：jessibuca 提供 on 方法
+    if (h265PlayerInstance && typeof h265PlayerInstance.on === 'function') {
+      h265PlayerInstance.on('loadfinish', () => { 
+          // loadfinish 替代 ready/play 作为加载完成的标志
+          loading.value = false
+          emit('loading', false)
+          emit('playing')
+          nextTick(() => adjustPlayerSize())
+      })
+      h265PlayerInstance.on('error', (e: any) => { 
+          console.error('[PreviewPlayer] Jessibuca error', e)
+          error.value = '播放器错误'
+          loading.value = false
+          emit('loading', false)
+          emit('error', error.value) 
+      })
+      h265PlayerInstance.on('start', () => { 
+          // 确保 play 后加载状态解除
+          if (loading.value) { 
+            loading.value = false; 
+            emit('loading', false);
+          }
+      })
+      // 可以在这里添加 videoInfo/audioInfo 等事件监听，参考案例
+    }
+
+    // jessibuca 会自动 play（autoplay:true），但确保 url 是通过配置传入的
+    // 如果播放器没有自动播放，可能需要手动调用 play() 或 start()
+    if (h265PlayerInstance && typeof h265PlayerInstance.play === 'function') {
+      h265PlayerInstance.play(finalUrl) // 显式调用 play 并传入 url
+    }
+
+    // 兜底：20s 后如果仍在 loading，关闭 loading
+    setTimeout(() => { if (loading.value && !error.value) { loading.value = false; emit('loading', false) } }, 20000)
+
+  } catch (e: any) {
+    console.error('[PreviewPlayer] Init failed (Jessibuca)', e)
+    error.value = e.message || '播放器初始化异常'
+    loading.value = false
+    emit('loading', false)
+    emit('error', error.value)
+  }
+}
+
+// ---------------- 业务逻辑保持不变 ----------------
+
+// 后端启动预览
+const startPreview = async (channelId?: string) => {
+  if (!props.device) return
+  const ch = channelId || props.selectedChannelId || (props.device as any)?.deviceId
+  if (!ch) return
+  
+  loading.value = true
+  emit('loading', true)
+  error.value = ''
+  
+  try {
+    const deviceId = (props.device as any).deviceId
+    // 假设这是一个标准的 GB28181 预览启动接口
+    const resp = await fetch(`/api/gb28181/devices/${deviceId}/channels/${ch}/preview/start`, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' } 
+    })
+    const data = await resp.json()
+    if (!data || !data.success) throw new Error(data?.error || '启动预览失败')
+    
+    streamInfoRaw.value = data.data
+    await initPlayer()
+    
+  } catch (e: any) {
+    console.error('startPreview error', e)
+    error.value = e.message || '启动预览失败'
+    loading.value = false
+    emit('loading', false)
+    emit('error', error.value)
+  }
+}
+
+// 直接使用已有流信息播放
+async function startWithStreamInfo(info: { hls_url?: string; flv_url?: string } | null) {
+  if (!info) return
+  streamInfoRaw.value = info
+  await initPlayer()
+}
+
+// 停止播放（含后端调用）
+const stopPreview = async () => {
+  // 先销毁播放器，释放资源
+  cleanup() 
+  // 然后通知后端停止流
+  if (streamInfoRaw.value) {
+    try {
+      // 假设后端停止接口接受流信息作为 body
+      const res = await fetch(`/api/gb28181/stop`, { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify(streamInfoRaw.value) 
+      })
+      await res.json().catch(() => ({}))
+    } catch (e) { 
+      console.warn('stopPreview backend failed', e) 
+    }
+  }
+  streamInfoRaw.value = null
+}
+
+const stopPlaybackOnly = () => cleanup()
+
+const retry = () => {
+  // 重新执行启动预览逻辑，如果 streamInfoRaw 还在，则直接 initPlayer
+  if (streamInfoRaw.value) {
+     initPlayer()
+  } else {
+     // 否则重新调用 startPreview
+     startPreview()
+  }
+}
+
+// PTZ 控制逻辑
+async function ptz(action: string, opts?: { deviceId?: string | number; channelId?: string | number }) {
+  const deviceId = opts?.deviceId ?? props.ptzDeviceId ?? (props.device as any)?.deviceId
+  const channelId = opts?.channelId ?? props.ptzChannelId ?? props.selectedChannelId
+  if (!deviceId || !channelId) {
+    ElMessage.error('缺少 PTZ 目标设备或通道信息')
+    return
+  }
+
+  try {
+    const body = { action, deviceId, channelId }
+    // 假设这是一个标准的 GB28181 PTZ 控制接口
+    const res = await fetch(`/api/gb28181/ptz`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const data = await res.json().catch(() => ({}))
+    if (data && (data.code === 0 || data.success)) {
+      ElMessage.success('PTZ 指令已发送')
+    } else {
+      ElMessage.error(data?.msg || 'PTZ 发送失败')
+    }
+  } catch (e: any) {
+    console.error('ptz request failed', e)
+    ElMessage.error('PTZ 操作失败')
+  }
+}
+
+defineExpose({ startPreview, startWithStreamInfo, stopPlaybackOnly, stopPreview, ptz })
+</script>
+
+<style scoped>
+.preview-player-root { width: 100%; height: 800px; }
+/* 关键：设置 video-player-wrapper 宽度，高度将由 JS 动态调整，或保持初始 100% */
+.video-player-wrapper { 
+  position: relative; 
+  width: 100%; 
+  /* 初始高度设为 800px，让 JS 在 loadfinish 后调整 */
+  height: 800px; 
+  background: #000; 
+  /* 确保过渡平滑 */
+  transition: height 0.3s ease; 
+}
+
+/* 容器样式：必须设置为块级且有宽高 */
+/* jessibuca 会在这个容器内创建 canvas/video 元素 */
+.video-player-container { 
+  width: 100%; 
+  height: 100%; 
+  background: #000; 
+  display: block;
+}
+
+.video-error { 
+  position: absolute; 
+  left: 50%; 
+  top: 50%; 
+  transform: translate(-50%, -50%); 
+  text-align: center; 
+  color: #fff; 
+  z-index: 10;
+}
+.ptz-controls { 
+  position: absolute; 
+  right: 8px; 
+  bottom: 8px; 
+  background: rgba(0,0,0,0.45); 
+  padding: 8px; 
+  border-radius: 6px; 
+  display:flex; 
+  flex-direction:column; 
+  gap:6px;
+  z-index: 20; 
+}
+.ptz-row { display:flex; justify-content:center; gap:6px }
+.ptz-zoom { margin-top:4px }
+</style>

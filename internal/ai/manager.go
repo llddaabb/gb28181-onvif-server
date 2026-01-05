@@ -108,6 +108,8 @@ func (m *AIRecordingManager) StartChannelRecording(channelID string, streamURL s
 		config.DetectorConfig.NumThreads = m.aiConfig.NumThreads
 		config.DetectorConfig.ModelPath = m.aiConfig.ModelPath
 		config.DetectorConfig.InputSize = m.aiConfig.InputSize
+		config.DetectorType = DetectorType(m.aiConfig.DetectorType)
+		config.APIEndpoint = m.aiConfig.APIEndpoint
 		if m.aiConfig.DetectInterval > 0 {
 			config.DetectInterval = time.Duration(m.aiConfig.DetectInterval) * time.Second
 		}

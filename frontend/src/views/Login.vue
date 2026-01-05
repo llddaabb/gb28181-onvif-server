@@ -64,6 +64,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import axios from 'axios'
+import { setAuthToken, setAuthCredentials, getAuthToken, clearAuth } from '../lib/auth'
 
 const router = useRouter()
 const route = useRoute()
@@ -104,14 +105,8 @@ const handleLogin = async () => {
     if (response.data.success) {
       // 保存 token 和用户信息
       const { token, user } = response.data
-      
-      if (rememberMe.value) {
-        localStorage.setItem('auth_token', token)
-        localStorage.setItem('user_info', JSON.stringify(user))
-      } else {
-        sessionStorage.setItem('auth_token', token)
-        sessionStorage.setItem('user_info', JSON.stringify(user))
-      }
+      setAuthToken(token, user, rememberMe.value)
+      setAuthCredentials(loginForm.username, loginForm.password, rememberMe.value)
       
       ElMessage.success('登录成功')
       
@@ -135,7 +130,7 @@ const handleLogin = async () => {
 
 // 检查是否已登录
 onMounted(() => {
-  const token = localStorage.getItem('auth_token') || sessionStorage.getItem('auth_token')
+  const token = getAuthToken()
   if (token) {
     // 验证 token 是否有效
     axios.get('/api/auth/validate', {
@@ -146,10 +141,7 @@ onMounted(() => {
       }
     }).catch(() => {
       // token 无效，清除存储
-      localStorage.removeItem('auth_token')
-      localStorage.removeItem('user_info')
-      sessionStorage.removeItem('auth_token')
-      sessionStorage.removeItem('user_info')
+      clearAuth()
     })
   }
 })

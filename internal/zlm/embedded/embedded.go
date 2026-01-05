@@ -30,6 +30,13 @@ type EmbeddedZLM struct {
 // EmbedEnabled 是否启用嵌入式 ZLM (在 embed.go 的 init() 中设置为 true)
 var EmbedEnabled = false
 
+func init() {
+	// 自动启用嵌入式 ZLM，只要可执行文件已通过 scripts/build_zlm.sh 嵌入
+	if len(MediaServerBinary) > 0 {
+		EmbedEnabled = true
+	}
+}
+
 // NewEmbeddedZLM 创建嵌入式 ZLM 管理器
 func NewEmbeddedZLM(extractDir string) *EmbeddedZLM {
 	if extractDir == "" {
@@ -189,7 +196,7 @@ func (e *EmbeddedZLM) GetWWWPath() string {
 	return e.wwwPath
 }
 
-// Cleanup 清理释放的文件
+// Cleanup 清理释放的文件（保留录像目录）
 func (e *EmbeddedZLM) Cleanup() error {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
@@ -199,7 +206,26 @@ func (e *EmbeddedZLM) Cleanup() error {
 	}
 
 	e.extracted = false
-	return os.RemoveAll(e.extractDir)
+
+	// 只删除可执行文件和日志，保留录像和配置
+	// 不再删除整个目录，因为录像需要持久化
+	filesToClean := []string{
+		filepath.Join(e.extractDir, "MediaServer"),
+	}
+
+	dirsToClean := []string{
+		filepath.Join(e.extractDir, "log"),
+	}
+
+	for _, file := range filesToClean {
+		os.Remove(file)
+	}
+
+	for _, dir := range dirsToClean {
+		os.RemoveAll(dir)
+	}
+
+	return nil
 }
 
 // GetVersion 获取版本信息

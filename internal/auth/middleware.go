@@ -33,25 +33,12 @@ func NewMiddleware(am *AuthManager) *Middleware {
 	return &Middleware{
 		authManager: am,
 		publicPaths: []string{
-			"/api/auth/login",
-			"/api/auth/logout",
-			"/api/health",
-			"/api/status",
-			"/api/stats",
-			"/api/resources",
-			"/api/logs",
-			"/api/config",
-			"/api/services",
-			"/api/gb28181/",
-			"/api/onvif/",
-			"/api/stream/",
-			"/api/channel/",
-			"/api/recording/",
-			"/api/storage/",
-			"/api/ai/",
-			"/api/zlm/", // ZLM 媒体服务器相关 API
 			"/assets/",
+			"/easyplayer/",
 			"/jessibuca/",
+			"/h265webjs/",
+			"/api/recording/zlm/file/",   // 录像回放文件，供播放器直接拉取
+			"/api/recording/zlm/stream/", // 录像推流接口，ffmpeg 推流
 			"/favicon.ico",
 		},
 		publicExactPaths: []string{
@@ -85,6 +72,7 @@ func (m *Middleware) isPublicPath(path string) bool {
 		strings.HasSuffix(path, ".jpg") ||
 		strings.HasSuffix(path, ".svg") ||
 		strings.HasSuffix(path, ".ico") ||
+		strings.HasSuffix(path, ".wasm") ||
 		strings.HasSuffix(path, ".woff") ||
 		strings.HasSuffix(path, ".woff2") ||
 		strings.HasSuffix(path, ".ttf") {

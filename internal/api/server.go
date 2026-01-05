@@ -20,6 +20,7 @@ import (
 	"gb28181-onvif-server/internal/debug"
 	"gb28181-onvif-server/internal/frontend"
 	"gb28181-onvif-server/internal/gb28181"
+	"gb28181-onvif-server/internal/mediautil"
 	"gb28181-onvif-server/internal/onvif"
 	"gb28181-onvif-server/internal/preview"
 	"gb28181-onvif-server/internal/push"
@@ -48,6 +49,8 @@ type Server struct {
 	channelManager     *ChannelManager
 	recordingManager   *RecordingManager
 	streamManager      *StreamManager
+	ffmpegStreamMgr    *mediautil.FFmpegStreamManager // ffmpeg 推流管理器
+	previewSessions    *PreviewSessionManager         // 预览会话管理器
 	startTime          time.Time
 	recordingWatchStop chan struct{}
 	gb28181Running     bool                       // GB28181 服务运行状态
@@ -80,6 +83,7 @@ func NewServer(cfg *config.Config, gbServer *gb28181.Server, onvifMgr *onvif.Man
 		channelManager:   NewChannelManager(),
 		recordingManager: NewRecordingManager(),
 		streamManager:    NewStreamManager(),
+		previewSessions:  NewPreviewSessionManager(),
 		startTime:        time.Now(),
 		gb28181Running:   true, // 默认启动时为运行状态
 		onvifRunning:     true, // 默认启动时为运行状态
@@ -89,6 +93,18 @@ func NewServer(cfg *config.Config, gbServer *gb28181.Server, onvifMgr *onvif.Man
 		s.previewManager = preview.NewManager(gbServer, zlmSrv)
 		// 初始化推流管理器
 		s.pushManager = push.NewManager(zlmSrv.GetAPIClient(), "configs/push_targets.json", cfg.ZLM.HTTP.Port)
+
+		// 初始化 ffmpeg 推流管理器
+		zlmRTMPHost := "127.0.0.1"
+		zlmRTMPPort := 1935
+		zlmHTTPHost := "127.0.0.1"
+		zlmHTTPPort := cfg.ZLM.HTTP.Port
+		if cfg.ZLM.RTMP != nil && cfg.ZLM.RTMP.Port != 0 {
+			zlmRTMPPort = cfg.ZLM.RTMP.Port
+		}
+		s.ffmpegStreamMgr = mediautil.NewFFmpegStreamManager(zlmRTMPHost, zlmRTMPPort, zlmHTTPHost, zlmHTTPPort)
+		log.Printf("[ffmpeg推流] 推流管理器初始化完成，ZLM RTMP: %s:%d, HTTP: %s:%d",
+			zlmRTMPHost, zlmRTMPPort, zlmHTTPHost, zlmHTTPPort)
 	}
 
 	// 初始化认证模块
@@ -267,25 +283,51 @@ func (s *Server) InitAIManager() error {
 
 // autoStartAIDetection 自动启动AI检测
 func (s *Server) autoStartAIDetection() {
-	// 等待一段时间让其他服务启动
-	time.Sleep(3 * time.Second)
+	// 等待一段时间让其他服务启动（包括GB28181设备注册）
+	time.Sleep(5 * time.Second)
 
 	log.Println("[AI] 正在自动启动AI检测...")
 
 	// 获取要启动的通道列表
 	var channelsToStart []struct {
-		ID        string
-		StreamURL string
+		ID          string
+		DeviceID    string
+		StreamURL   string
+		NeedPreview bool
 	}
 
 	if len(s.config.AI.AutoChannels) > 0 {
 		// 使用配置的通道列表
 		for _, chID := range s.config.AI.AutoChannels {
-			if ch, exists := s.channelManager.GetChannel(chID); exists && ch != nil && ch.StreamURL != "" {
-				channelsToStart = append(channelsToStart, struct {
-					ID        string
-					StreamURL string
-				}{ID: chID, StreamURL: ch.StreamURL})
+			if ch, exists := s.channelManager.GetChannel(chID); exists && ch != nil {
+				if ch.StreamURL != "" {
+					channelsToStart = append(channelsToStart, struct {
+						ID          string
+						DeviceID    string
+						StreamURL   string
+						NeedPreview bool
+					}{ID: chID, DeviceID: ch.DeviceID, StreamURL: ch.StreamURL, NeedPreview: false})
+				} else {
+					// 通道存在但没有StreamURL，标记需要启动预览
+					channelsToStart = append(channelsToStart, struct {
+						ID          string
+						DeviceID    string
+						StreamURL   string
+						NeedPreview bool
+					}{ID: chID, DeviceID: ch.DeviceID, StreamURL: "", NeedPreview: true})
+				}
+			} else {
+				// 尝试从GB28181获取通道
+				if s.gb28181Server != nil {
+					if gb28181Ch, found := s.gb28181Server.GetChannelByID(chID); found {
+						channelsToStart = append(channelsToStart, struct {
+							ID          string
+							DeviceID    string
+							StreamURL   string
+							NeedPreview bool
+						}{ID: chID, DeviceID: gb28181Ch.DeviceID, StreamURL: "", NeedPreview: true})
+					}
+				}
 			}
 		}
 	} else {
@@ -294,23 +336,71 @@ func (s *Server) autoStartAIDetection() {
 		for _, ch := range allChannels {
 			if ch.StreamURL != "" {
 				channelsToStart = append(channelsToStart, struct {
-					ID        string
-					StreamURL string
-				}{ID: ch.ChannelID, StreamURL: ch.StreamURL})
+					ID          string
+					DeviceID    string
+					StreamURL   string
+					NeedPreview bool
+				}{ID: ch.ChannelID, DeviceID: ch.DeviceID, StreamURL: ch.StreamURL, NeedPreview: false})
+			}
+		}
+
+		// 如果没有通道或通道都没有StreamURL，尝试从GB28181获取
+		if len(channelsToStart) == 0 && s.gb28181Server != nil {
+			devices := s.gb28181Server.GetDevices()
+			for _, device := range devices {
+				gb28181Channels := s.gb28181Server.GetChannels(device.DeviceID)
+				for _, gb28181Ch := range gb28181Channels {
+					channelsToStart = append(channelsToStart, struct {
+						ID          string
+						DeviceID    string
+						StreamURL   string
+						NeedPreview bool
+					}{ID: gb28181Ch.ChannelID, DeviceID: gb28181Ch.DeviceID, StreamURL: "", NeedPreview: true})
+				}
 			}
 		}
 	}
 
 	if len(channelsToStart) == 0 {
 		log.Println("[AI] 没有可用的通道，等待通道配置后再启动AI检测")
-		log.Println("[AI] 提示：GB28181通道需要先启动预览才能进行AI检测")
 		return
 	}
 
 	// 启动各通道的AI检测
 	startedCount := 0
 	for _, ch := range channelsToStart {
-		if err := s.aiManager.StartChannelRecording(ch.ID, ch.StreamURL, ai.RecordingModePerson); err != nil {
+		streamURL := ch.StreamURL
+
+		// 如果需要启动预览，先启动预览获取StreamURL
+		if ch.NeedPreview {
+			log.Printf("[AI] 通道 %s 未启动预览，正在自动启动预览...", ch.ID)
+
+			// 启动预览（不依赖HTTP请求）
+			zlmHost := "127.0.0.1"
+			httpPort, rtmpPort, rtspPort := s.getZLMPorts()
+
+			var previewRes *preview.PreviewResult
+			var err error
+
+			// GB28181 流
+			if s.previewManager != nil {
+				previewRes, err = s.previewManager.StartChannelPreview(ch.DeviceID, ch.ID, "rtp", zlmHost, httpPort, rtmpPort)
+			} else {
+				err = fmt.Errorf("preview manager 未初始化")
+			}
+
+			if err != nil {
+				log.Printf("[AI] 启动通道 %s 的预览失败: %v", ch.ID, err)
+				continue
+			}
+
+			// 使用RTSP流进行AI检测（因为FLV不支持H.265）
+			streamURL = fmt.Sprintf("rtsp://%s:%d/rtp/%s", zlmHost, rtspPort, previewRes.StreamID)
+
+			log.Printf("[AI] 通道 %s 预览启动成功，StreamURL: %s", ch.ID, streamURL)
+		}
+
+		if err := s.aiManager.StartChannelRecording(ch.ID, streamURL, ai.RecordingModePerson); err != nil {
 			log.Printf("[AI] 启动通道 %s 的AI检测失败: %v", ch.ID, err)
 		} else {
 			startedCount++
@@ -387,6 +477,12 @@ func (s *Server) Start() error {
 // Stop 停止API服务器
 func (s *Server) Stop() error {
 	s.stopRecordingWatchdog()
+
+	// 停止所有 ffmpeg 推流会话
+	if s.ffmpegStreamMgr != nil {
+		log.Println("[ffmpeg推流] 停止所有推流会话...")
+		s.ffmpegStreamMgr.StopAll()
+	}
 
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -551,6 +647,7 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	gb28181Group.HandleFunc("/record/clear", s.handleGB28181ClearRecordCache).Methods("DELETE")         // 清除录像缓存
 	gb28181Group.HandleFunc("/record/playback", s.handleGB28181RecordPlayback).Methods("POST")          // 设备端录像回放
 	gb28181Group.HandleFunc("/record/playback/stop", s.handleGB28181StopRecordPlayback).Methods("POST") // 停止录像回放
+	gb28181Group.HandleFunc("/record/playback/diagnose", s.handleDiagnoseRTPPlayback).Methods("GET")    // 诊断 RTP 录像回放
 	gb28181Group.HandleFunc("/start", s.handleStartGB28181Service).Methods("POST")                      // 启动GB28181服务
 	gb28181Group.HandleFunc("/stop", s.handleStopGB28181Service).Methods("POST")                        // 停止GB28181服务
 
@@ -584,6 +681,14 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	streamGroup := r.PathPrefix("/api/stream").Subrouter()
 	streamGroup.HandleFunc("/start", s.handleStartStream).Methods("POST")
 	streamGroup.HandleFunc("/stop", s.handleStopStream).Methods("POST")
+
+	// 预览管理API
+	previewGroup := r.PathPrefix("/api/preview").Subrouter()
+	previewGroup.HandleFunc("/sessions", s.handleGetPreviewSessions).Methods("GET")
+	previewGroup.HandleFunc("/sessions/{key}", s.handleGetPreviewSession).Methods("GET")
+	previewGroup.HandleFunc("/sessions/{key}", s.handleStopPreviewSession).Methods("DELETE")
+	previewGroup.HandleFunc("/start", s.handleStartPreview).Methods("POST")
+	previewGroup.HandleFunc("/stop", s.handleStopPreview).Methods("POST")
 	streamGroup.HandleFunc("/list", s.handleListStreams).Methods("GET")
 
 	// 通道管理API
@@ -600,7 +705,14 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	// 录像管理API
 	recordingGroup := r.PathPrefix("/api/recording").Subrouter()
 	recordingGroup.HandleFunc("/zlm/list", s.handleListZLMRecordings).Methods("GET")
-	recordingGroup.HandleFunc("/zlm/play/{app}/{stream}/{file}", s.handlePlayZLMRecording).Methods("GET")
+	// 录像推流播放（ffmpeg -> ZLM -> FLV）- 必须在 /play/ 之前注册
+	recordingGroup.HandleFunc("/zlm/stream/{app}/{stream}/{file:.*}", s.handleStreamRecording).Methods("GET")
+	recordingGroup.HandleFunc("/zlm/stream/stop", s.handleStopStreamRecording).Methods("POST")
+	recordingGroup.HandleFunc("/zlm/stream/sessions", s.handleListStreamSessions).Methods("GET")
+	// 直接提供录像文件流（支持 Range 请求和 HEAD 请求）
+	recordingGroup.HandleFunc("/zlm/file/{app}/{stream}/{file:.*}", s.handleServeRecordingFile).Methods("GET", "HEAD")
+	// 支持带日期路径的文件名: /zlm/play/rtp/stream_id/2026-01-04/filename.mp4（向后兼容，已弃用）
+	recordingGroup.HandleFunc("/zlm/play/{app}/{stream}/{file:.*}", s.handlePlayZLMRecording).Methods("GET")
 	recordingGroup.HandleFunc("/zlm/dates", s.handleGetRecordingDates).Methods("GET") // 获取有录像的日期列表
 	recordingGroup.HandleFunc("/zlm/stop", s.handleStopPlayback).Methods("POST")      // 停止回放
 	recordingGroup.HandleFunc("/query", s.handleQueryRecordings).Methods("GET")
@@ -638,6 +750,7 @@ func (s *Server) setupRoutes(r *mux.Router) {
 	// ZLM媒体服务器API
 	zlmGroup := r.PathPrefix("/api/zlm").Subrouter()
 	zlmGroup.HandleFunc("/status", s.handleZLMStatus).Methods("GET")
+	zlmGroup.HandleFunc("/config", s.handleZLMConfig).Methods("GET")
 	zlmGroup.HandleFunc("/media-list", s.handleGetZLMMediaList).Methods("GET")
 	zlmGroup.HandleFunc("/process/status", s.handleZLMProcessStatus).Methods("GET")
 	zlmGroup.HandleFunc("/process/start", s.handleZLMProcessStart).Methods("POST")
@@ -668,6 +781,7 @@ func (s *Server) setupRoutes(r *mux.Router) {
 
 	// 静态文件服务（必须在最后）- 支持嵌入式和本地文件系统
 	r.PathPrefix("/assets/").Handler(http.StripPrefix("/assets/", s.staticServer.SubDirHandler("assets")))
+	r.PathPrefix("/easyplayer/").Handler(http.StripPrefix("/easyplayer/", s.staticServer.SubDirHandler("easyplayer")))
 	r.PathPrefix("/jessibuca/").Handler(http.StripPrefix("/jessibuca/", s.staticServer.SubDirHandler("jessibuca")))
 	r.PathPrefix("/h265webjs/").Handler(http.StripPrefix("/h265webjs/", s.staticServer.SubDirHandler("h265webjs")))
 	r.HandleFunc("/", s.handleServeStaticFile).Methods("GET")
@@ -776,21 +890,6 @@ func (s *Server) checkAndRestartRecordings() {
 	}
 }
 
-// PreviewSession 预览会话信息
-type PreviewSession struct {
-	DeviceID   string `json:"device_id"`
-	StreamKey  string `json:"stream_key"`
-	App        string `json:"app"`
-	Stream     string `json:"stream"`
-	SourceURL  string `json:"source_url"`
-	FlvURL     string `json:"flv_url"`
-	WsFlvURL   string `json:"ws_flv_url"`
-	HlsURL     string `json:"hls_url"`
-	RtmpURL    string `json:"rtmp_url"`
-	RtspURL    string `json:"rtsp_url"`
-	CreateTime int64  `json:"create_time"`
-}
-
 // handleZLMProxy ZLM流媒体代理，解决跨域问题
 // 将 /zlm/{app}/{stream}.live.flv 代理到 ZLM 的 HTTP-FLV 服务
 func (s *Server) handleZLMProxy(w http.ResponseWriter, r *http.Request) {
@@ -893,6 +992,31 @@ func (s *Server) startPreview(r *http.Request, deviceID, channelID, rtspURL, app
 	if err != nil {
 		return nil, err
 	}
+
+	// 保存预览会话
+	deviceType := "gb28181"
+	if rtspURL != "" {
+		deviceType = "onvif"
+	}
+
+	session := &PreviewSession{
+		DeviceID:   deviceID,
+		ChannelID:  channelID,
+		StreamKey:  fmt.Sprintf("%s:%s", deviceID, channelID),
+		App:        app,
+		Stream:     res.StreamID,
+		SourceURL:  rtspURL,
+		FlvURL:     res.FlvURL,
+		WsFlvURL:   res.WsFlvURL,
+		HlsURL:     res.HlsURL,
+		RtmpURL:    res.RtmpURL,
+		RtspURL:    "",
+		CreateTime: time.Now().Unix(),
+		DeviceType: deviceType,
+	}
+	s.previewSessions.Add(session)
+
+	debug.Info("preview", "预览会话已创建: key=%s, app=%s, stream=%s", session.StreamKey, app, res.StreamID)
 
 	// 构建可访问的 URL
 	urls := s.buildStreamURLs(r, app, res.StreamID)

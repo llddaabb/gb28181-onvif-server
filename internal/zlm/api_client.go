@@ -442,7 +442,7 @@ func (c *ZLMAPIClient) GetStreamProxyList() ([]*StreamProxyInfo, error) {
 }
 
 // IsStreamOnline 检查流是否在线
-// API: GET /api/isMediaOnline
+// API: GET /index/api/isMediaOnline
 func (c *ZLMAPIClient) IsStreamOnline(app, stream string) (bool, error) {
 	var resp struct {
 		Code   int  `json:"code"`
@@ -452,9 +452,11 @@ func (c *ZLMAPIClient) IsStreamOnline(app, stream string) (bool, error) {
 	params := map[string]interface{}{
 		"app":    app,
 		"stream": stream,
+		"schema": "rtsp",
+		"vhost":  "__defaultVhost__",
 	}
 
-	err := c.doRequest("GET", "/api/isMediaOnline", params, &resp)
+	err := c.doRequest("GET", "/index/api/isMediaOnline", params, &resp)
 	if err != nil {
 		return false, err
 	}
@@ -484,14 +486,14 @@ func (c *ZLMAPIClient) GetServerConfig() (map[string]interface{}, error) {
 }
 
 // SetServerConfig 设置服务器配置
-// API: POST /api/setServerConfig
+// API: GET /index/api/setServerConfig
 func (c *ZLMAPIClient) SetServerConfig(config map[string]interface{}) error {
 	var resp struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
 
-	err := c.doRequest("POST", "/api/setServerConfig", config, &resp)
+	err := c.doRequest("GET", "/index/api/setServerConfig", config, &resp)
 	if err != nil {
 		return err
 	}

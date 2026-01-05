@@ -37,7 +37,9 @@ else
 endif
 
 # 编译标志
-LDFLAGS := -s -w
+# -s -w: 移除符号表和调试信息（减小二进制大小）
+# -extldflags '-Wl,-rpath=\$$ORIGIN/lib': 指定运行时库搜索路径（使用 $ORIGIN 相对路径）
+LDFLAGS := -s -w -extldflags '-Wl,-rpath=\$$ORIGIN/lib'
 BUILD_TAGS := 
 
 # 平台标识文件
@@ -74,7 +76,7 @@ build-server: check-zlm-platform
 	@echo ">>> 检测系统架构: $(UNAME_M) -> $(DETECTED_ARCH)"
 	@echo ">>> 构建 Go 服务器 ($(GOOS)/$(GOARCH))..."
 	@mkdir -p $(OUTPUT_DIR)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build \
+	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build \
 		-ldflags "$(LDFLAGS)" \
 		-tags "$(BUILD_TAGS)" \
 		-o $(OUTPUT_DIR)/$(SERVER_NAME)$(SERVER_EXT) \
@@ -184,6 +186,21 @@ package: embed-frontend build-server
 	cp quick_start.sh $$RELEASE_DIR/ 2>/dev/null || true; \
 	echo ">>> 复制文档..."; \
 	cp README.md $$RELEASE_DIR/ 2>/dev/null || true; \
+	echo ">>> 复制 AI 模型文件（可选）..."; \
+	if [ -d "models" ] && [ -n "$$(ls -A models/*.onnx 2>/dev/null)" ]; then \
+		mkdir -p $$RELEASE_DIR/models; \
+		cp models/*.onnx $$RELEASE_DIR/models/ 2>/dev/null || true; \
+		cp models/README.md $$RELEASE_DIR/models/ 2>/dev/null || true; \
+		echo "✓ AI 模型文件已复制"; \
+	else \
+		echo "ℹ 未找到 AI 模型文件（models/*.onnx），跳过"; \
+	fi; \
+	echo ">>> 复制依赖库文件..."; \
+	if [ -d "internal/ai/lib" ]; then \
+		mkdir -p $$RELEASE_DIR/lib; \
+		cp internal/ai/lib/*.so* $$RELEASE_DIR/lib/ 2>/dev/null || true; \
+		echo "✓ 依赖库文件已复制"; \
+	fi; \
 	echo ">>> 创建目录结构..."; \
 	mkdir -p $$RELEASE_DIR/logs $$RELEASE_DIR/recordings; \
 	echo ">>> 打包压缩..."; \
@@ -207,6 +224,21 @@ package-with-zlm: build-all
 	cp quick_start.sh $$RELEASE_DIR/ 2>/dev/null || true; \
 	echo ">>> 复制文档..."; \
 	cp README.md $$RELEASE_DIR/ 2>/dev/null || true; \
+	echo ">>> 复制 AI 模型文件（可选）..."; \
+	if [ -d "models" ] && [ -n "$$(ls -A models/*.onnx 2>/dev/null)" ]; then \
+		mkdir -p $$RELEASE_DIR/models; \
+		cp models/*.onnx $$RELEASE_DIR/models/ 2>/dev/null || true; \
+		cp models/README.md $$RELEASE_DIR/models/ 2>/dev/null || true; \
+		echo "✓ AI 模型文件已复制"; \
+	else \
+		echo "ℹ 未找到 AI 模型文件（models/*.onnx），跳过"; \
+	fi; \
+	echo ">>> 复制依赖库文件..."; \
+	if [ -d "internal/ai/lib" ]; then \
+		mkdir -p $$RELEASE_DIR/lib; \
+		cp internal/ai/lib/*.so* $$RELEASE_DIR/lib/ 2>/dev/null || true; \
+		echo "✓ 依赖库文件已复制"; \
+	fi; \
 	echo ">>> 创建目录结构..."; \
 	mkdir -p $$RELEASE_DIR/logs $$RELEASE_DIR/recordings; \
 	echo ">>> 打包压缩..."; \

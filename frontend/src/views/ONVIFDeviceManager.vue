@@ -851,22 +851,20 @@ const onPreviewDialogOpen = () => {
 // 在进行关键操作前，统一验证设备凭证并在验证成功后同步通道到通道管理
 const ensureDeviceAuth = async (device: Device) => {
   if (!device) return false
-  
+
   try {
-    // 先尝试获取设备的配置文件（这会验证设备可以访问）
-    const profilesResp = await fetch(`/api/onvif/devices/${device.deviceId}/profiles`)
+    const profilesResp = await fetch(`/api/onvif/devices/${encodeURIComponent(device.deviceId)}/profiles`)
     if (profilesResp.ok) {
-      return true // 说明设备可以访问
+      return true
     }
-    
-    // 如果获取配置文件失败，提示用户
+
+    // 如果返回 JSON，展示错误信息
     const err = await profilesResp.json().catch(() => ({}))
-    ElMessage.warning('设备可能需要重新认证或不在线')
+    const msg = err.error || err.message || '设备可能需要重新认证或不在线'
+    ElMessage.warning(msg)
     return false
   } catch (e: any) {
-    // 如果没有 profiles 就直接返回 true，因为设备已经被发现了
-    // 这样前端不会被认证流程阻止
-    console.warn('获取设备配置文件失败，继续使用默认参数', e.message)
+    console.warn('获取设备配置文件失败，继续使用默认参数', e?.message)
     return true
   }
 }

@@ -10,6 +10,41 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// 配置管理总览：
+// ===============================================================================
+// 本系统采用单一配置源 (Single Source of Truth) 设计：
+//
+// 1. 唯一配置源：config.yaml
+//    - 包含所有系统配置：GB28181、ONVIF、API、调试、ZLM、AI、认证等
+//    - 由运维人员维护和编辑
+//    - 应被纳入版本控制
+//
+// 2. 自动生成：zlm_config.ini
+//    - 由程序在启动时从 config.yaml 中的 ZLM 配置动态生成
+//    - 生成方式：Config.ZLM.GenerateConfigINI() 方法
+//    - 不应被手动编辑，不应纳入版本控制
+//    - 作用：供 ZLMediaKit 进程读取
+//
+// 3. 启动流程：
+//    a) 加载 config.yaml
+//    b) 解析为 Config 结构体
+//    c) 调用 cfg.ZLM.GenerateConfigINI() 生成 INI 格式内容
+//    d) 通过 ProcessManager.SetConfigContent() 传递给 ZLM 进程
+//    e) ZLM 进程启动前，将配置内容写入临时配置文件
+//    f) ZLM 进程读取此配置文件启动
+//
+// 4. 配置同步原理：
+//    - 每次启动时重新生成 zlm_config.ini，保证与 config.yaml 同步
+//    - 如需修改 ZLM 配置，仅需编辑 config.yaml 然后重启服务
+//    - 不存在两个配置文件版本不一致的问题
+//
+// 5. 关键配置项对应关系：
+//    config.yaml ZLM.API.Secret  <-> zlm_config.ini [api] secret=
+//    config.yaml ZLM.HTTP.Port   <-> zlm_config.ini [http] port=
+//    config.yaml ZLM.RTMP.Port   <-> zlm_config.ini [rtmp] port=
+//    ... 以此类推
+// ===============================================================================
+
 // GB28181Config GB28181配置结构体
 type GB28181Config struct {
 	SipIP             string `yaml:"SipIP"`
@@ -598,6 +633,17 @@ func (z *ZLMConfig) FillDefaults() {
 }
 
 // GenerateConfigINI 生成 ZLMediaKit config.ini 内容
+//
+// 此方法将 config.yaml 中的 ZLM 配置转换为 INI 格式文本，供 ZLMediaKit 进程使用。
+// 转换后的内容包括以下 14 个配置段：
+//
+//	[api]、[ffmpeg]、[protocol]、[general]、[hls]、[hook]、[cluster]、
+//	[http]、[multicast]、[record]、[rtmp]、[rtp]、[rtp_proxy]、[rtc]、[srt]、[rtsp]、[shell]
+//
+// 说明：
+// - 此方法在服务启动时调用，由 ProcessManager 使用
+// - 生成的内容不应被手动编辑
+// - 每次启动都重新生成，确保与 config.yaml 完全同步
 func (z *ZLMConfig) GenerateConfigINI() string {
 	var sb strings.Builder
 
@@ -759,6 +805,15 @@ func (z *ZLMConfig) GenerateConfigINI() string {
 		// ZLM使用字节为单位
 		sb.WriteString(fmt.Sprintf("fileSizeMB=%d\n", z.Record.FileSizeMB))
 	}
+
+	// 视频编码转码配置
+	if z.Record.EnableVideoCodec {
+		sb.WriteString(fmt.Sprintf("enable_video_codec=%d\n", 1))
+		sb.WriteString(fmt.Sprintf("video_codec=%s\n", z.Record.VideoCodec))
+		if z.Record.VideoBitrate > 0 {
+			sb.WriteString(fmt.Sprintf("video_bitrate=%d\n", z.Record.VideoBitrate))
+		}
+	}
 	sb.WriteString("\n")
 
 	// [rtmp]
@@ -889,4 +944,80 @@ func (c *Config) Save(filePath string) error {
 
 	log.Printf("配置保存成功: %s", filePath)
 	return nil
+}
+
+// Validate 验证配置的正确性
+// 返回警告信息列表和错误信息列表
+// 错误表示配置无法启动，警告表示可能的问题但不影响启动
+func (c *Config) Validate() (warnings []string, errors []string) {
+	if c.ZLM != nil {
+		// 检查 API 密钥
+		if c.ZLM.API == nil || c.ZLM.API.Secret == "" {
+			warnings = append(warnings, "ZLM API Secret 未配置，安全性降低")
+		}
+
+		// 检查关键端口是否有效
+		if c.ZLM.HTTP != nil && c.ZLM.HTTP.Port <= 0 || c.ZLM.HTTP.Port > 65535 {
+			errors = append(errors, fmt.Sprintf("ZLM HTTP 端口无效: %d", c.ZLM.HTTP.Port))
+		}
+		if c.ZLM.RTMP != nil && (c.ZLM.RTMP.Port <= 0 || c.ZLM.RTMP.Port > 65535) {
+			errors = append(errors, fmt.Sprintf("ZLM RTMP 端口无效: %d", c.ZLM.RTMP.Port))
+		}
+		if c.ZLM.RTSP != nil && (c.ZLM.RTSP.Port <= 0 || c.ZLM.RTSP.Port > 65535) {
+			errors = append(errors, fmt.Sprintf("ZLM RTSP 端口无效: %d", c.ZLM.RTSP.Port))
+		}
+		if c.ZLM.RTPProxy != nil && (c.ZLM.RTPProxy.Port <= 0 || c.ZLM.RTPProxy.Port > 65535) {
+			errors = append(errors, fmt.Sprintf("ZLM RTP Proxy 端口无效: %d", c.ZLM.RTPProxy.Port))
+		}
+
+		// 检查 FFmpeg 路径是否存在
+		if c.ZLM.FFmpeg != nil && c.ZLM.FFmpeg.Bin != "" {
+			if _, err := os.Stat(c.ZLM.FFmpeg.Bin); err != nil {
+				warnings = append(warnings, fmt.Sprintf("FFmpeg 不在指定路径: %s", c.ZLM.FFmpeg.Bin))
+			}
+		}
+
+		// 检查录制路径是否有效
+		if c.ZLM.Record != nil && c.ZLM.Record.RecordPath != "" {
+			if _, err := os.Stat(c.ZLM.Record.RecordPath); os.IsNotExist(err) {
+				// 路径不存在，尝试创建
+				if err := os.MkdirAll(c.ZLM.Record.RecordPath, 0755); err != nil {
+					warnings = append(warnings, fmt.Sprintf("无法创建录制目录: %s", c.ZLM.Record.RecordPath))
+				}
+			}
+		}
+	}
+
+	// 检查 GB28181 配置
+	if c.GB28181 != nil {
+		if c.GB28181.SipPort <= 0 || c.GB28181.SipPort > 65535 {
+			errors = append(errors, fmt.Sprintf("GB28181 SIP 端口无效: %d", c.GB28181.SipPort))
+		}
+		if c.GB28181.Realm == "" {
+			errors = append(errors, "GB28181 Realm 未配置")
+		}
+		if c.GB28181.ServerID == "" {
+			errors = append(errors, "GB28181 ServerID 未配置")
+		}
+	}
+
+	// 检查 API 配置
+	if c.API != nil {
+		if c.API.Port <= 0 || c.API.Port > 65535 {
+			errors = append(errors, fmt.Sprintf("API 端口无效: %d", c.API.Port))
+		}
+		if c.API.StaticDir == "" {
+			c.API.StaticDir = "www" // 自动修复
+		}
+	}
+
+	// 检查日志目录
+	if c.Debug != nil && c.Debug.LogFile != "" {
+		logDir := filepath.Dir(c.Debug.LogFile)
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			warnings = append(warnings, fmt.Sprintf("无法创建日志目录: %s", logDir))
+		}
+	}
+
+	return warnings, errors
 }

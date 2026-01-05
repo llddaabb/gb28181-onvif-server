@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,7 +13,35 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// getRecordingPath 获取配置的录像文件存储路径
+func (s *Server) getRecordingPath() string {
+	// 优先使用config.yaml中配置的RecordPath
+	if s.config.ZLM != nil && s.config.ZLM.Record != nil && s.config.ZLM.Record.RecordPath != "" {
+		recordPath := s.config.ZLM.Record.RecordPath
+		// 确保是绝对路径
+		if absPath, err := filepath.Abs(recordPath); err == nil {
+			return absPath
+		}
+		return recordPath
+	}
+
+	// 回退到ZLM工作目录下的默认路径
+	if s.zlmProcess != nil {
+		workDir := s.zlmProcess.GetWorkDir()
+		return filepath.Join(workDir, "www", "record")
+	}
+
+	// 最后回退到当前目录下的recordings目录
+	return "./recordings"
+}
+
 // handleListZLMRecordings 按通道和日期查询ZLM录像文件列表 (NVR风格)
+// 查询参数:
+//   - channelId: 通道ID（必需）
+//   - date: 查询日期，格式: 2025-12-07（可选）
+//   - app: 应用名（可选，默认live）
+//   - page: 页码，从1开始（可选，默认1）
+//   - page_size: 每页数量（可选，默认20）
 func (s *Server) handleListZLMRecordings(w http.ResponseWriter, r *http.Request) {
 	if s.zlmProcess == nil {
 		s.jsonError(w, http.StatusInternalServerError, "ZLM进程未初始化")
@@ -24,6 +53,27 @@ func (s *Server) handleListZLMRecordings(w http.ResponseWriter, r *http.Request)
 	dateStr := r.URL.Query().Get("date") // 格式: 2025-12-07
 	app := r.URL.Query().Get("app")      // 默认为 live
 
+	// 分页参数
+	page := 1
+	pageSize := 20
+	if p := r.URL.Query().Get("page"); p != "" {
+		if pn, err := fmt.Sscanf(p, "%d", &page); err == nil && pn > 0 {
+			if page < 1 {
+				page = 1
+			}
+		}
+	}
+	if ps := r.URL.Query().Get("page_size"); ps != "" {
+		if pn, err := fmt.Sscanf(ps, "%d", &pageSize); err == nil && pn > 0 {
+			if pageSize < 1 {
+				pageSize = 20
+			}
+			if pageSize > 100 {
+				pageSize = 100
+			}
+		}
+	}
+
 	if channelId == "" {
 		s.jsonError(w, http.StatusBadRequest, "缺少channelId参数")
 		return
@@ -33,9 +83,8 @@ func (s *Server) handleListZLMRecordings(w http.ResponseWriter, r *http.Request)
 		app = "live"
 	}
 
-	// 获取ZLM实际工作目录
-	workDir := s.zlmProcess.GetWorkDir()
-	recordPath := filepath.Join(workDir, "www", "record")
+	// 获取配置的录像目录
+	recordPath := s.getRecordingPath()
 
 	// 构造通道录像目录路径: record/{app}/{channelId}/
 	channelRecordPath := filepath.Join(recordPath, app, channelId)
@@ -85,14 +134,40 @@ func (s *Server) handleListZLMRecordings(w http.ResponseWriter, r *http.Request)
 		return ti > tj
 	})
 
+	// 分页处理
+	totalCount := len(recordings)
+	totalPages := (totalCount + pageSize - 1) / pageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	// 计算分页范围
+	startIdx := (page - 1) * pageSize
+	endIdx := startIdx + pageSize
+	if startIdx > totalCount {
+		startIdx = totalCount
+	}
+	if endIdx > totalCount {
+		endIdx = totalCount
+	}
+
+	// 获取当前页数据
+	pagedRecordings := recordings[startIdx:endIdx]
+
 	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"channelId":  channelId,
 		"date":       dateStr,
 		"app":        app,
 		"recordPath": channelRecordPath,
-		"total":      len(recordings),
-		"recordings": recordings,
+		"total":      totalCount,
+		"page":       page,
+		"pageSize":   pageSize,
+		"totalPages": totalPages,
+		"recordings": pagedRecordings,
 	})
 }
 
@@ -201,8 +276,8 @@ func parseRecordingFileName(fileName, date string) (startTime, endTime, duration
 	return
 }
 
-// handlePlayZLMRecording 播放ZLM录像
-// 通过创建临时流代理来播放MP4录像文件
+// handlePlayZLMRecording 播放ZLM录像 - 使用ZLM原生MP4转流功能
+// ZLM会自动将MP4文件转换为HLS/FMP4/TS等流媒体格式
 func (s *Server) handlePlayZLMRecording(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
 	app := params["app"]
@@ -214,9 +289,8 @@ func (s *Server) handlePlayZLMRecording(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 获取ZLM实际工作目录
-	workDir := s.zlmProcess.GetWorkDir()
-	recordPath := filepath.Join(workDir, "www", "record")
+	// 获取配置的录像目录
+	recordPath := s.getRecordingPath()
 
 	// 文件名可能包含日期目录，需要递归查找
 	var filePath string
@@ -234,50 +308,35 @@ func (s *Server) handlePlayZLMRecording(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 获取相对于www目录的路径用于ZLM访问
-	// ZLM可以通过 /record/{app}/{stream}/{date}/{file} 访问录像文件
-	relPath, _ := filepath.Rel(filepath.Join(workDir, "www"), filePath)
+	// 使用 ffmpeg 推流到 ZLM
+	if s.ffmpegStreamMgr == nil {
+		s.jsonError(w, http.StatusInternalServerError, "ffmpeg推流管理器未初始化")
+		return
+	}
 
-	// 获取 ZLM HTTP 端口
-	zlmHost := "127.0.0.1"
-	zlmHTTPPort, _, _ := s.getZLMPorts()
+	log.Printf("[录像] 开始推流: %s", filePath)
 
-	// 构造多种播放 URL
-	// 1. HTTP直接访问MP4文件（可能浏览器不支持某些编码）
-	mp4URL := fmt.Sprintf("http://%s:%d/%s", zlmHost, zlmHTTPPort, strings.ReplaceAll(relPath, "\\", "/"))
+	// 开始推流
+	session, err := s.ffmpegStreamMgr.StartStream(filePath)
+	if err != nil {
+		log.Printf("[录像] 推流失败: %v", err)
+		s.jsonError(w, http.StatusInternalServerError, fmt.Sprintf("推流失败: %v", err))
+		return
+	}
 
-	// 2. 生成唯一的回放流ID
-	playbackStreamID := fmt.Sprintf("playback_%s_%d", stream, time.Now().Unix())
+	// 获取 API 服务端口（用于下载链接）
+	apiPort := 9080
+	if s.config != nil && s.config.API != nil && s.config.API.Port != 0 {
+		apiPort = s.config.API.Port
+	}
 
-	// 3. 尝试通过 ZLM API 创建流代理（将 MP4 文件转为 FLV 流）
-	var flvURL string
-	var wsFlvURL string
-	var streamKey string
-	var proxyCreated bool
-
-	if s.zlmServer != nil && s.zlmServer.GetAPIClient() != nil {
-		apiClient := s.zlmServer.GetAPIClient()
-		// 使用 file:// 协议让 ZLM 读取本地 MP4 文件
-		fileSourceURL := "file://" + filePath
-
-		// 添加流代理选项
-		opts := map[string]interface{}{
-			"enable_mp4":   false,
-			"enable_hls":   false,
-			"enable_rtsp":  false,
-			"enable_rtmp":  false,
-			"timeout_sec":  300, // 5分钟超时
-			"retry_count":  0,   // 不重试（文件播放完即结束）
-			"enable_audio": true,
-		}
-
-		proxyInfo, err := apiClient.AddStreamProxyWithOptions(fileSourceURL, "playback", playbackStreamID, opts)
-		if err == nil && proxyInfo != nil {
-			streamKey = proxyInfo.Key
-			flvURL = fmt.Sprintf("http://%s:%d/playback/%s.live.flv", zlmHost, zlmHTTPPort, playbackStreamID)
-			wsFlvURL = fmt.Sprintf("ws://%s:%d/playback/%s.live.flv", zlmHost, zlmHTTPPort, playbackStreamID)
-			proxyCreated = true
-		}
+	// 获取前端请求的主机名
+	reqHost := r.Host
+	if idx := strings.LastIndex(reqHost, ":"); idx != -1 {
+		reqHost = reqHost[:idx]
+	}
+	if reqHost == "" || reqHost == "127.0.0.1" {
+		reqHost = "localhost"
 	}
 
 	// 获取文件信息
@@ -287,27 +346,25 @@ func (s *Server) handlePlayZLMRecording(w http.ResponseWriter, r *http.Request) 
 		fileSize = formatFileSize(fileInfo.Size())
 	}
 
-	response := map[string]interface{}{
-		"success":      true,
-		"mp4Url":       mp4URL,
-		"playUrl":      mp4URL, // 默认返回MP4
-		"downloadUrl":  mp4URL,
-		"filePath":     filePath,
-		"relativePath": relPath,
-		"app":          app,
-		"stream":       stream,
-		"fileName":     fileName,
-		"fileSize":     fileSize,
-	}
+	// 构造下载URL
+	downloadUrl := fmt.Sprintf("http://%s:%d/api/recording/zlm/file/%s/%s/%s",
+		reqHost, apiPort, app, stream, fileName)
 
-	if proxyCreated {
-		response["flvUrl"] = flvURL
-		response["wsFlvUrl"] = wsFlvURL
-		response["streamKey"] = streamKey
-		response["playUrl"] = flvURL // 优先使用 FLV 流
-		response["note"] = "使用 FLV 流播放，支持 H.264/H.265"
-	} else {
-		response["note"] = "直接播放 MP4 文件，如浏览器不支持请下载后使用播放器"
+	log.Printf("[录像] 推流成功: streamId=%s, flvUrl=%s", session.ID, session.FLVUrl)
+
+	response := map[string]interface{}{
+		"success":     true,
+		"playUrl":     session.FLVUrl, // FLV 播放地址
+		"flvUrl":      session.FLVUrl,
+		"streamId":    session.ID,
+		"downloadUrl": downloadUrl,
+		"filePath":    filePath,
+		"app":         app,
+		"stream":      stream,
+		"fileName":    fileName,
+		"fileSize":    fileSize,
+		"hwAccel":     string(session.HWAccelType),
+		"note":        "使用 ffmpeg 推流到 ZLM，支持 H.265 转码",
 	}
 
 	s.jsonResponse(w, http.StatusOK, response)
@@ -322,6 +379,29 @@ func findRecordingFile(recordPath, app, stream, fileName string) string {
 	targetNames := []string{fileName, "." + fileName}
 
 	filepath.Walk(channelPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		for _, name := range targetNames {
+			if info.Name() == name {
+				foundPath = path
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+
+	return foundPath
+}
+
+// deepSearchRecordingFile 深度递归搜索录像文件
+func deepSearchRecordingFile(searchPath, fileName string) string {
+	var foundPath string
+
+	// 需要同时查找带点和不带点的文件名
+	targetNames := []string{fileName, "." + fileName}
+
+	filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -401,9 +481,8 @@ func (s *Server) handleGetRecordingDates(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// 获取ZLM实际工作目录
-	workDir := s.zlmProcess.GetWorkDir()
-	recordPath := filepath.Join(workDir, "www", "record")
+	// 获取配置的录像目录
+	recordPath := s.getRecordingPath()
 
 	// 构造通道录像目录路径
 	channelRecordPath := filepath.Join(recordPath, app, channelId)
@@ -513,5 +592,189 @@ func (s *Server) handleStopPlayback(w http.ResponseWriter, r *http.Request) {
 	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"message": "回放已停止",
+	})
+}
+
+// handleServeRecordingFile 直接提供录像文件流（支持 Range 请求）
+func (s *Server) handleServeRecordingFile(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	app := params["app"]
+	stream := params["stream"]
+	fileName := params["file"]
+
+	if s.zlmProcess == nil {
+		http.Error(w, "ZLM进程未初始化", http.StatusInternalServerError)
+		return
+	}
+
+	// 获取配置的录像目录
+	recordPath := s.getRecordingPath()
+
+	// 文件名可能包含日期目录
+	var filePath string
+	if strings.Contains(fileName, "/") {
+		filePath = filepath.Join(recordPath, app, stream, fileName)
+	} else {
+		filePath = findRecordingFile(recordPath, app, stream, fileName)
+	}
+
+	// 检查文件是否存在
+	if filePath == "" || !fileExists(filePath) {
+		http.Error(w, "录像文件不存在", http.StatusNotFound)
+		return
+	}
+
+	// 使用 http.ServeFile 提供文件，自动支持 Range 请求
+	http.ServeFile(w, r, filePath)
+}
+
+// handleStreamRecording 开始录像转流播放
+// 使用 ZLM 原生 MP4 转流功能，无需 ffmpeg 推流
+func (s *Server) handleStreamRecording(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	app := params["app"]
+	stream := params["stream"]
+	fileName := params["file"]
+
+	if s.zlmProcess == nil {
+		s.jsonError(w, http.StatusInternalServerError, "ZLM进程未初始化")
+		return
+	}
+
+	// 获取配置的录像目录
+	recordPath := s.getRecordingPath()
+
+	// 查找录像文件
+	var filePath string
+	if strings.Contains(fileName, "/") {
+		filePath = filepath.Join(recordPath, app, stream, fileName)
+	} else {
+		filePath = findRecordingFile(recordPath, app, stream, fileName)
+	}
+
+	log.Printf("[录像转流] 搜索结果: recordPath=%s, app=%s, stream=%s, fileName=%s, found=%v", recordPath, app, stream, fileName, fileExists(filePath))
+
+	// 检查文件是否存在
+	if filePath == "" || !fileExists(filePath) {
+		log.Printf("[录像转流] 文件未找到: recordPath=%s, app=%s, stream=%s, fileName=%s", recordPath, app, stream, fileName)
+		s.jsonError(w, http.StatusNotFound, fmt.Sprintf("录像文件不存在 (已检查: %s/%s/%s)", app, stream, fileName))
+		return
+	}
+
+	log.Printf("[录像转流] 开始转流: %s", filePath)
+
+	// 使用 ffmpeg 推流到 ZLM
+	if s.ffmpegStreamMgr == nil {
+		s.jsonError(w, http.StatusInternalServerError, "ffmpeg推流管理器未初始化")
+		return
+	}
+
+	// 开始推流
+	session, err := s.ffmpegStreamMgr.StartStream(filePath)
+	if err != nil {
+		log.Printf("[录像转流] 推流失败: %v", err)
+		s.jsonError(w, http.StatusInternalServerError, fmt.Sprintf("推流失败: %v", err))
+		return
+	}
+
+	// 获取 API 服务端口（用于下载链接）
+	apiPort := 9080
+	if s.config != nil && s.config.API != nil && s.config.API.Port != 0 {
+		apiPort = s.config.API.Port
+	}
+
+	// 获取前端请求的主机名
+	reqHost := r.Host
+	if idx := strings.LastIndex(reqHost, ":"); idx != -1 {
+		reqHost = reqHost[:idx]
+	}
+	if reqHost == "" || reqHost == "127.0.0.1" {
+		reqHost = "localhost"
+	}
+
+	// 获取文件信息
+	fileInfo, _ := os.Stat(filePath)
+	var fileSize string
+	if fileInfo != nil {
+		fileSize = formatFileSize(fileInfo.Size())
+	}
+
+	// 构造下载URL
+	downloadUrl := fmt.Sprintf("http://%s:%d/api/recording/zlm/file/%s/%s/%s",
+		reqHost, apiPort, app, stream, fileName)
+
+	log.Printf("[录像转流] 推流成功: streamId=%s, flvUrl=%s", session.ID, session.FLVUrl)
+
+	// 返回播放地址和会话信息
+	response := map[string]interface{}{
+		"success":     true,
+		"playUrl":     session.FLVUrl, // FLV 播放地址
+		"flvUrl":      session.FLVUrl,
+		"streamId":    session.ID,
+		"downloadUrl": downloadUrl,
+		"filePath":    filePath,
+		"app":         app,
+		"stream":      stream,
+		"fileName":    fileName,
+		"fileSize":    fileSize,
+		"hwAccel":     string(session.HWAccelType),
+		"note":        "使用 ffmpeg 推流到 ZLM，支持 H.265 转码",
+	}
+
+	s.jsonResponse(w, http.StatusOK, response)
+}
+
+// handleStopStreamRecording 停止录像推流
+func (s *Server) handleStopStreamRecording(w http.ResponseWriter, r *http.Request) {
+	streamID := r.URL.Query().Get("streamId")
+	if streamID == "" {
+		s.jsonError(w, http.StatusBadRequest, "缺少streamId参数")
+		return
+	}
+
+	if s.ffmpegStreamMgr == nil {
+		s.jsonError(w, http.StatusInternalServerError, "ffmpeg推流管理器未初始化")
+		return
+	}
+
+	err := s.ffmpegStreamMgr.StopStream(streamID)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, fmt.Sprintf("停止推流失败: %v", err))
+		return
+	}
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "推流已停止",
+	})
+}
+
+// handleListStreamSessions 列出所有推流会话
+func (s *Server) handleListStreamSessions(w http.ResponseWriter, r *http.Request) {
+	if s.ffmpegStreamMgr == nil {
+		s.jsonError(w, http.StatusInternalServerError, "ffmpeg推流管理器未初始化")
+		return
+	}
+
+	sessions := s.ffmpegStreamMgr.ListSessions()
+
+	sessionInfos := make([]map[string]interface{}, 0, len(sessions))
+	for _, session := range sessions {
+		sessionInfos = append(sessionInfos, map[string]interface{}{
+			"streamId":  session.ID,
+			"filePath":  session.FilePath,
+			"flvUrl":    session.FLVUrl,
+			"rtmpUrl":   session.RTMPUrl,
+			"hwAccel":   string(session.HWAccelType),
+			"running":   session.IsRunning(),
+			"duration":  session.GetDuration().Seconds(),
+			"startTime": session.StartTime.Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	s.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":  true,
+		"sessions": sessionInfos,
+		"total":    len(sessionInfos),
 	})
 }

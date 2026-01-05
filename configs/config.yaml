@@ -149,7 +149,7 @@ ZLM:
         EnableFmp4: false
         FileSecond: 600
         FileSizeMB: 0
-        EnableVideoCodec: false
+        EnableVideoCodec: true
         VideoCodec: h264
         VideoBitrate: 2000
     RTC:
@@ -180,15 +180,15 @@ ZLM:
         MaxReqSize: 1024
 AI:
     Enable: true
-    AutoStart: true
-    DetectorType: "auto"
-    APIEndpoint: "http://localhost:8000/detect"
-    ModelPath: "models/yolov8s.onnx"
-    Confidence: 0.55
+    AutoStart: false
+    DetectorType: "onnx"
+    APIEndpoint: ""
+    ModelPath: "models/yolov8s.opset21.onnx"
+    Confidence: 0.5
     IoUThreshold: 0.45
-    InputSize: 640
-    DetectInterval: 2
-    RecordDelay: 10
+    InputSize: 0
+    DetectInterval: 1
+    RecordDelay: 15
     MinRecordTime: 0
     NumThreads: 4
     AutoChannels: []

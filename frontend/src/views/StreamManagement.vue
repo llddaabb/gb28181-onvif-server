@@ -48,6 +48,91 @@
       </el-col>
     </el-row>
 
+    <!-- 预览会话列表 -->
+    <el-card shadow="hover" class="sessions-card" style="margin-bottom: 20px;">
+      <template #header>
+        <div class="card-header">
+          <span class="title">🎬 活动预览会话</span>
+          <div class="header-actions">
+            <el-badge :value="previewSessions.length" :hidden="previewSessions.length === 0" type="primary">
+              <el-button type="success" :icon="Refresh" @click="fetchPreviewSessions" :loading="sessionsLoading">
+                刷新会话
+              </el-button>
+            </el-badge>
+          </div>
+        </div>
+      </template>
+
+      <el-table 
+        :data="previewSessions" 
+        style="width: 100%" 
+        v-loading="sessionsLoading" 
+        empty-text="暂无活动的预览会话"
+        size="small"
+      >
+        <el-table-column prop="device_id" label="设备ID" width="180">
+          <template #default="{ row }">
+            <span style="font-family: monospace;">{{ row.device_id }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="channel_id" label="通道ID" width="180">
+          <template #default="{ row }">
+            <span style="font-family: monospace;">{{ row.channel_id }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="device_type" label="类型" width="100">
+          <template #default="{ row }">
+            <el-tag :type="row.device_type === 'gb28181' ? 'success' : 'primary'" size="small">
+              {{ row.device_type === 'gb28181' ? 'GB28181' : 'ONVIF' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="app" label="应用" width="100">
+          <template #default="{ row }">
+            <el-tag type="info" size="small">{{ row.app }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="stream" label="流名" width="160">
+          <template #default="{ row }">
+            <span style="font-family: monospace;">{{ row.stream }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="持续时间" width="110">
+          <template #default="{ row }">
+            <span>{{ formatDuration(row.create_time) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="180" fixed="right">
+          <template #default="{ row }">
+            <el-button 
+              type="primary" 
+              link 
+              size="small" 
+              @click="previewSession(row)"
+            >
+              预览
+            </el-button>
+            <el-button 
+              type="success" 
+              link 
+              size="small" 
+              @click="copySessionUrl(row)"
+            >
+              复制地址
+            </el-button>
+            <el-button 
+              type="danger" 
+              link 
+              size="small" 
+              @click="stopSession(row)"
+            >
+              停止
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
     <!-- 媒体流列表 -->
     <el-card shadow="hover" class="streams-card">
       <template #header>
@@ -199,6 +284,7 @@ import { ref, reactive, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import PreviewPlayer from '../components/PreviewPlayer.vue'
+import { getAuthToken } from '../lib/auth'
 
 interface Stream {
   app?: string
@@ -219,12 +305,44 @@ interface Stream {
   schema?: string
 }
 
+interface PreviewSession {
+  device_id: string
+  channel_id: string
+  stream_key: string
+  app: string
+  stream: string
+  flv_url: string
+  ws_flv_url: string
+  hls_url: string
+  rtmp_url: string
+  rtsp_url: string
+  create_time: number
+  device_type: string
+}
+
+interface ZLMConfig {
+  http: { port: number }
+  rtsp: { port: number }
+  rtmp: { port: number }
+}
+
 const streams = ref<Stream[]>([])
 const loading = ref(false)
 const addStreamLoading = ref(false)
 const showAddStreamDialog = ref(false)
 const showPreviewDialog = ref(false)
 const zlmRunning = ref(false)
+
+// ZLM配置
+const zlmConfig = ref<ZLMConfig>({
+  http: { port: 8081 },
+  rtsp: { port: 8554 },
+  rtmp: { port: 1935 }
+})
+
+// 预览会话
+const previewSessions = ref<PreviewSession[]>([])
+const sessionsLoading = ref(false)
 
 // 统计信息
 const statistics = computed(() => {
@@ -264,6 +382,20 @@ const previewLoading = ref(false)
 // 定时刷新
 let refreshTimer: number | null = null
 
+// 获取 ZLM 配置
+const fetchZLMConfig = async () => {
+  try {
+    const response = await fetch('/api/zlm/config')
+    const data = await response.json()
+    if (data.success && data.config) {
+      zlmConfig.value = data.config
+      console.log('获取到ZLM配置:', data.config)
+    }
+  } catch (error) {
+    console.error('获取ZLM配置失败:', error)
+  }
+}
+
 // 获取 ZLM 状态
 const checkZlmStatus = async () => {
   try {
@@ -272,6 +404,134 @@ const checkZlmStatus = async () => {
     zlmRunning.value = data.success && data.process?.running
   } catch {
     zlmRunning.value = false
+  }
+}
+
+// 获取预览会话列表
+const fetchPreviewSessions = async () => {
+  sessionsLoading.value = true
+  try {
+    const token = getAuthToken()
+    if (!token) {
+      console.warn('No authentication token found')
+      sessionsLoading.value = false
+      return
+    }
+    const response = await fetch('/api/preview/sessions', {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    })
+    const data = await response.json()
+    
+    if (data.success) {
+      previewSessions.value = data.sessions || []
+    } else {
+      console.error('获取预览会话失败:', data.error)
+    }
+  } catch (error) {
+    console.error('获取预览会话失败:', error)
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+// 格式化持续时间
+const formatDuration = (createTime: number): string => {
+  const now = Math.floor(Date.now() / 1000)
+  const duration = now - createTime
+  
+  if (duration < 60) {
+    return `${duration}秒`
+  } else if (duration < 3600) {
+    return `${Math.floor(duration / 60)}分钟`
+  } else if (duration < 86400) {
+    const hours = Math.floor(duration / 3600)
+    const minutes = Math.floor((duration % 3600) / 60)
+    return `${hours}小时${minutes}分钟`
+  } else {
+    const days = Math.floor(duration / 86400)
+    const hours = Math.floor((duration % 86400) / 3600)
+    return `${days}天${hours}小时`
+  }
+}
+
+// 预览会话
+const previewSession = async (session: PreviewSession) => {
+  previewInfo.stream = `${session.app}/${session.stream}`
+  
+  // 构建完整的播放地址
+  const baseUrl = `http://${window.location.host}`
+  previewInfo.httpFlv = session.flv_url.startsWith('http') ? session.flv_url : `${baseUrl}${session.flv_url}`
+  previewInfo.hls = session.hls_url.startsWith('http') ? session.hls_url : `${baseUrl}${session.hls_url}`
+  previewInfo.rtsp = session.rtsp_url || `rtsp://${window.location.hostname}:8554/${session.app}/${session.stream}`
+  previewInfo.rtmp = session.rtmp_url || `rtmp://${window.location.hostname}:1935/${session.app}/${session.stream}`
+  
+  showPreviewDialog.value = true
+  previewLoading.value = true
+  
+  nextTick(() => {
+    try {
+      const candidate = previewPlayerRef.value
+      const p = (candidate && typeof candidate.startWithStreamInfo === 'function') ? candidate : (candidate && candidate.value && typeof candidate.value.startWithStreamInfo === 'function') ? candidate.value : (candidate && candidate.$ && candidate.$.exposed && typeof candidate.$.exposed.startWithStreamInfo === 'function') ? candidate.$.exposed : null
+      if (!p) {
+        previewLoading.value = false
+        return
+      }
+      p.startWithStreamInfo({ flv_url: previewInfo.httpFlv, hls_url: previewInfo.hls })
+    } catch (e) { 
+      previewLoading.value = false 
+    }
+  })
+}
+
+// 复制会话地址
+const copySessionUrl = (session: PreviewSession) => {
+  const baseUrl = `http://${window.location.host}`
+  const url = session.flv_url.startsWith('http') ? session.flv_url : `${baseUrl}${session.flv_url}`
+  copyUrl(url)
+}
+
+// 停止会话
+const stopSession = async (session: PreviewSession) => {
+  try {
+    await ElMessageBox.confirm(
+      `确定要停止预览会话 ${session.device_id}:${session.channel_id} 吗？`, 
+      '确认停止', 
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+  } catch {
+    return
+  }
+
+  try {
+    const token = getAuthToken()
+    if (!token) {
+      ElMessage.error('未找到认证token，请重新登录')
+      return
+    }
+    const response = await fetch(`/api/preview/sessions/${session.stream_key}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    })
+    const data = await response.json()
+    
+    if (data.success) {
+      ElMessage.success('预览会话已停止')
+      await fetchPreviewSessions()
+      await fetchStreams() // 同时刷新流列表
+    } else {
+      ElMessage.error(data.error || '停止预览会话失败')
+    }
+  } catch (error) {
+    console.error('停止预览会话失败:', error)
+    ElMessage.error('停止预览会话失败')
   }
 }
 
@@ -355,7 +615,7 @@ const addStream = async () => {
   }
 }
 
-// 预览流 - 从后端API获取正确的播放地址
+// 预览流 - 使用从后端获取的端口配置
 const previewStream = async (row: Stream) => {
   const app = row.app || 'live'
   const stream = row.stream || row.ID || row.streamID || 'stream'
@@ -363,24 +623,16 @@ const previewStream = async (row: Stream) => {
   previewInfo.stream = `${app}/${stream}`
   previewInfo.url = row.originUrl || row.URL || row.streamUrl || ''
   
-  // 从后端API获取流的播放地址（包含正确的端口配置）
-  try {
-    const response = await fetch(`/api/zlm/streams/${app}/${stream}/urls`)
-    if (response.ok) {
-      const data = await response.json()
-      // 使用后端返回的URL
-      previewInfo.httpFlv = data.flv_url || data.httpFlv || ''
-      previewInfo.hls = data.hls_url || data.hls || ''
-      previewInfo.rtsp = data.rtsp_url || data.rtsp || ''
-      previewInfo.rtmp = data.rtmp_url || data.rtmp || ''
-    } else {
-      ElMessage.error('获取流地址失败')
-      return
-    }
-  } catch (error) {
-    console.error('获取流地址失败:', error) 
-    
-  }
+  // 使用从后端获取的端口配置
+  const hostname = window.location.hostname
+  const httpPort = zlmConfig.value.http.port
+  const rtspPort = zlmConfig.value.rtsp.port
+  const rtmpPort = zlmConfig.value.rtmp.port
+  
+  previewInfo.httpFlv = `http://${hostname}:${httpPort}/${app}/${stream}.live.flv`
+  previewInfo.hls = `http://${hostname}:${httpPort}/${app}/${stream}/hls.m3u8`
+  previewInfo.rtsp = `rtsp://${hostname}:${rtspPort}/${app}/${stream}`
+  previewInfo.rtmp = `rtmp://${hostname}:${rtmpPort}/${app}/${stream}`
   
   showPreviewDialog.value = true
   // 打开对话框后使用 nextTick 启动播放并监听播放器事件
@@ -439,13 +691,14 @@ const copyUrl = (url: string) => {
   })
 }
 
-// 复制流地址 - 使用已获取的正确地址
+// 复制流地址 - 使用从后端获取的端口配置
 const copyStreamUrl = (row: Stream) => {
-  // 优先使用RTSP地址（最通用）
   const app = row.app || 'live'
   const stream = row.stream || row.ID || row.streamID || 'stream'
-  // 使用相对路径，让后端代理处理
-  const url = `http://${window.location.host}/zlm/${app}/${stream}.live.flv`
+  // 使用从后端获取的端口配置
+  const hostname = window.location.hostname
+  const httpPort = zlmConfig.value.http.port
+  const url = `http://${hostname}:${httpPort}/${app}/${stream}.live.flv`
   copyUrl(url)
 }
 
@@ -483,9 +736,14 @@ const removeStream = async (row: Stream) => {
 }
 
 onMounted(() => {
+  fetchZLMConfig()
   fetchStreams()
+  fetchPreviewSessions()
   // 每10秒自动刷新
-  refreshTimer = window.setInterval(fetchStreams, 10000)
+  refreshTimer = window.setInterval(() => {
+    fetchStreams()
+    fetchPreviewSessions()
+  }, 10000)
 })
 
 onUnmounted(() => {

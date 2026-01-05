@@ -30,10 +30,10 @@ func StartFFmpegTranscode(stream string, app string, inputURL string, rtmpTarget
 	var args []string
 	lower := strings.ToLower(inputURL)
 	if strings.HasPrefix(lower, "rtsp://") {
-		args = []string{"-rtsp_transport", "tcp", "-re", "-i", inputURL, "-c:a", "aac", "-b:a", "64k", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-x264-params", "keyint=50", "-f", "flv", rtmpTarget}
+		args = []string{"-rtsp_transport", "tcp", "-re", "-i", inputURL, "-loglevel", "warning", "-c:a", "aac", "-b:a", "64k", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-x264-params", "keyint=50", "-f", "flv", rtmpTarget}
 	} else {
 		// UDP/other: 不使用 -rtsp_transport
-		args = []string{"-re", "-i", inputURL, "-c:a", "aac", "-b:a", "64k", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-x264-params", "keyint=50", "-f", "flv", rtmpTarget}
+		args = []string{"-re", "-i", inputURL, "-loglevel", "warning", "-c:a", "aac", "-b:a", "64k", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-x264-params", "keyint=50", "-f", "flv", rtmpTarget}
 	}
 
 	cmd := exec.Command(ffmpegBin, args...)
@@ -49,17 +49,26 @@ func StartFFmpegTranscode(stream string, app string, inputURL string, rtmpTarget
 		return fmt.Errorf("start ffmpeg failed: %w", err)
 	}
 
+	// 限制日志输出大小的辅助函数
+	truncateOutput := func(output string, maxLen int) string {
+		if len(output) <= maxLen {
+			return output
+		}
+		return output[:maxLen] + "... [输出过长，已截断]"
+	}
+
 	go func(s string, c *exec.Cmd, outBuf, errBuf *bytes.Buffer) {
 		err := c.Wait()
 		if err != nil {
-			debug.Error("ffmpeg", "ffmpeg process for %s exited with error: %v, stderr=%s", s, err, errBuf.String())
+			// 只记录错误信息和截断的stderr
+			debug.Error("ffmpeg", "ffmpeg process for %s exited with error: %v, stderr=%s", s, err, truncateOutput(errBuf.String(), 200))
 			// 如果是因为 udp 端口被占用，尝试从本地 ZLM 的 RTMP 源拉取并重试一次
 			low := strings.ToLower(errBuf.String())
 			if strings.Contains(low, "address already in use") || strings.Contains(low, "bind failed") {
 				debug.Info("ffmpeg", "尝试使用 RTMP 作为回退输入拉取: %s", s)
 				// 构造 rtmp 输入，默认使用本地 1935 端口
 				rtmpIn := fmt.Sprintf("rtmp://127.0.0.1:1935/%s/%s", app, s)
-				args2 := []string{"-re", "-i", rtmpIn, "-c:a", "aac", "-b:a", "64k", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-x264-params", "keyint=50", "-f", "flv", rtmpTarget}
+				args2 := []string{"-re", "-i", rtmpIn, "-loglevel", "warning", "-c:a", "aac", "-b:a", "64k", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-x264-params", "keyint=50", "-f", "flv", rtmpTarget}
 				cmd2 := exec.Command(ffmpegBin, args2...)
 				var out2 bytes.Buffer
 				var err2 bytes.Buffer
@@ -71,26 +80,13 @@ func StartFFmpegTranscode(stream string, app string, inputURL string, rtmpTarget
 					return
 				}
 				if err := cmd2.Wait(); err != nil {
-					debug.Error("ffmpeg", "fallback ffmpeg process for %s exited with error: %v, stderr=%s", s, err, err2.String())
+					debug.Error("ffmpeg", "fallback ffmpeg process for %s exited with error: %v, stderr=%s", s, err, truncateOutput(err2.String(), 200))
 				} else {
 					debug.Info("ffmpeg", "fallback ffmpeg process for %s exited", s)
 				}
-				if out2.Len() > 0 {
-					debug.Info("ffmpeg", "fallback ffmpeg stdout for %s: %s", s, out2.String())
-				}
-				if err2.Len() > 0 {
-					debug.Info("ffmpeg", "fallback ffmpeg stderr for %s: %s", s, err2.String())
-				}
 			}
 		} else {
-			debug.Info("ffmpeg", "ffmpeg process for %s exited", s)
-		}
-		// keep some of the output for debugging
-		if outBuf.Len() > 0 {
-			debug.Info("ffmpeg", "ffmpeg stdout for %s: %s", s, outBuf.String())
-		}
-		if errBuf.Len() > 0 {
-			debug.Info("ffmpeg", "ffmpeg stderr for %s: %s", s, errBuf.String())
+			debug.Info("ffmpeg", "ffmpeg process for %s exited normally", s)
 		}
 	}(stream, cmd, &stdout, &stderr)
 

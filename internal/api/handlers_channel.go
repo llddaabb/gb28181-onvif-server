@@ -221,6 +221,13 @@ func (s *Server) handleStartChannelRecording(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// 检查是否找到流
+	if foundApp == "" || foundStream == "" {
+		debug.Error("api", "找不到通道对应的流: channelID=%s, streamID=%s", channelID, streamID)
+		respondInternalError(w, fmt.Sprintf("找不到通道 %s 对应的流，请先开始预览", channelID))
+		return
+	}
+
 	// 开始 MP4 录像 (type=1)
 	err := apiClient.StartRecord(foundApp, foundStream, 1, "", 0)
 	if err != nil {

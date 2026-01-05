@@ -1,0 +1,8 @@
+This file describes the changes needed for StreamManagement.vue
+
+1. Add interface PreviewSession after interface Stream
+2. Add previewSessions and sessionsLoading refs
+3. Add functions: fetchPreviewSessions, formatDuration, previewSession, copySessionUrl, stopSession
+4. Add preview sessions card in template before streams card
+5. Update onMounted to call fetchPreviewSessions
+6. Update refreshTimer to also refresh sessions

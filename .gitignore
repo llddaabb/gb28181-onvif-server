@@ -28,6 +28,11 @@ third-party/zlm/log/
 third-party/zlm/recordings/
 third-party/zlm/www/record/
 $THIRD_PARTY_DIR/
+# zlm_config.ini 由程序在启动时自动从 config.yaml 生成，不应纳入版本控制
+configs/zlm_config.ini
+# ZLM 工作目录（嵌入式 ZLM 的运行时目录）
+/tmp/.zlm-*/
+
 
 # 录像文件
 *.mp4
